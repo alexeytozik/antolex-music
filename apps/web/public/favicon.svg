@@ -1,0 +1,24 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="noteGradient" x1="96" y1="56" x2="164" y2="186" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1DE9B6"/>
+      <stop offset="1" stop-color="#12D6C5"/>
+    </linearGradient>
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background tile -->
+  <rect x="24" y="24" width="208" height="208" rx="32" fill="#0B0F14"/>
+  <rect x="24.75" y="24.75" width="206.5" height="206.5" rx="31.25" stroke="#FFFFFF" stroke-opacity="0.08"/>
+
+  <!-- Centered music note -->
+  <g filter="url(#softGlow)">
+    <path d="M158 58C158 55.7909 156.209 54 154 54C153.616 54 153.233 54.0553 152.864 54.1643L116.864 64.7893C113.475 65.7898 111.154 68.9005 111.154 72.4345V147.145C105.89 143.983 98.9755 142.925 91.9556 144.518C79.1755 147.418 69.9892 157.889 71.4394 167.904C72.8895 177.92 84.4267 183.691 97.2068 180.791C108.7 178.183 117.327 169.495 117.79 160.59L118 160.598V93.3167L150 83.8723V127.145C144.736 123.983 137.822 122.925 130.802 124.518C118.021 127.418 108.835 137.889 110.285 147.904C111.735 157.92 123.273 163.691 136.053 160.791C147.546 158.183 156.173 149.495 156.636 140.59L156.846 140.598V58H158Z" fill="url(#noteGradient)"/>
+  </g>
+</svg>

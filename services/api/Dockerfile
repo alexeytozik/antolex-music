@@ -1,0 +1,19 @@
+FROM golang:1.25-alpine AS build
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/tozikron-api ./cmd/api
+
+FROM alpine:3.22
+
+RUN apk add --no-cache ca-certificates wget ffmpeg
+
+COPY --from=build /usr/local/bin/tozikron-api /usr/local/bin/tozikron-api
+
+EXPOSE 8080
+
+CMD ["tozikron-api"]
