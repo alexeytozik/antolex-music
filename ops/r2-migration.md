@@ -6,7 +6,6 @@ The migration moves objects from the old `tozikron-music` bucket to `antolex-mus
 
 - Create the target bucket separately; creation changes remote state and is not hidden inside a script.
 - Configure a read-only R2 S3 token for the source bucket and a separate read/write token for the target bucket. Keep both outside shell history.
-- Back up PostgreSQL with `scripts/backup-postgres.sh`.
 - Keep uploads disabled for the final copy window so the source inventory cannot change underneath the verification.
 
 Load these values from a mode-`600` environment file or a secret manager:
@@ -106,7 +105,7 @@ aws --endpoint-url "${R2_ENDPOINT:-https://${R2_ACCOUNT_ID}.r2.cloudflarestorage
 
 The final `s3 cp` changes the target bucket and intentionally rewrites every
 source key, including an existing same-size target object; it never deletes a
-target-only key. Run it only after the backup and both preview reviews have
+target-only key. Run it only after both preview reviews have
 passed. Keep `migration_stage` until the verification below passes, then remove
 that exact temporary directory.
 

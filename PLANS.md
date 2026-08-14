@@ -10,7 +10,7 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 2. Replace the legacy single-request upload and automatic R2 reconciliation with authenticated multipart upload APIs and a dedicated worker that verifies, probes, extracts artwork, and creates 256 kbps M4A playback files.
 3. Rebuild the web client around mobile bottom navigation, a dedicated Add queue, infinite feeds, safe-area handling, a mini/full player, Media Session, and persisted playback state.
 4. Replace all user-facing branding with ANTOLEX Music and add the complete vector/raster asset package.
-5. Add Caddy, worker/backup services, migration dry-run tooling, and local-to-production runbooks.
+5. Add Caddy, worker/deploy services, migration dry-run tooling, and local-to-production runbooks.
 6. Verify backend, frontend, Docker, migration dry-run, and 320/390/412 px layouts.
 7. Restore the wide desktop listening experience from the original Tozikron UI while keeping the mobile application as a deliberately separate interface: desktop header navigation, horizontal catalog rows, and a full-width fixed player at 900 px and above; mobile bottom navigation, mini-player, and full-screen player below 900 px.
 8. Use the same cursor-based infinite catalog on desktop and mobile, fetching 20 tracks at a time. Keep the desktop header on one line with a larger wordmark and a single Add/Profile entry point. Limit every new audio file to 50 MiB in the browser, API, and database.
@@ -21,19 +21,19 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 13. Add GitHub Actions on the public repository for frontend tests/build, backend test/vet, and production Compose validation. Serialize deployments from `main`, transfer a checksummed release over strict-host-key SSH without third-party deployment actions, activate only after health checks, and keep versioned releases with a shared production environment.
 14. Consolidate the live library around production as the only source of truth. Merge the 13 verified local-only tracks without re-uploading their existing R2 media, retain one canonical M4A playback object plus an optional cover per track, migrate the four legacy `library/` objects, remove verified originals and smoke-test data, and retire the local Docker database immediately after production validation.
 
-## Production consolidation (in progress)
+## Production consolidation (completed)
 
-1. Capture an exact local/production database diff and R2 inventory. The owner explicitly waived new backups for this pet-project consolidation.
-2. Dry-run collision and object checks, then transactionally insert only the 13 local-only `library_tracks` rows into production and invalidate the search cache.
-3. Deploy worker/schema changes that stop retaining `originals/` objects after successful M4A publication.
-4. Copy and verify the four legacy playable objects into canonical `playback/<track-id>.m4a` keys, update production rows atomically, and verify all 29 tracks, covers, and streams.
-5. Delete only the now-unreferenced 25 `originals/` objects, four replaced `library/` audio objects, and the single smoke-test object. Confirm there are no missing referenced objects or incomplete multipart uploads.
-6. Stop the local ANTOLEX stack and immediately remove its PostgreSQL/Redis volumes as explicitly requested. Remove only confirmed ANTOLEX/Tozikron development images and volumes; preserve unrelated Docker resources.
+1. Captured the exact local/production database diff and R2 inventory. The owner explicitly waived backups for this pet-project consolidation.
+2. Dry-ran collision and object checks, transactionally inserted the 13 local-only `library_tracks` rows into production, and invalidated the search cache.
+3. Deployed worker changes that retain only canonical M4A playback and optional cover objects after publication.
+4. Copied and SHA-256-verified the four legacy playable objects under `playback/<track-id>.m4a`, then updated production rows atomically.
+5. Removed the 25 unreferenced `originals/` objects, four replaced `library/` audio objects, and the smoke-test object. R2 now contains exactly the 41 objects referenced by production PostgreSQL.
+6. Stopped the local ANTOLEX stack and immediately removed its PostgreSQL/Redis volumes, the old Tozikron volumes, and project-specific development images while preserving unrelated Docker resources.
 
 ## Current local status
 
 - Milestones 1–12 are implemented locally; final verification is repeated after each playback change.
-- PostgreSQL was backed up before migration. The six confirmed legacy duplicates and the Cover Test track were then removed through guarded worker jobs after explicit approval; the library now has 16 ready tracks, no unresolved hashes, and no exact SHA-256 duplicate groups.
+- The six confirmed legacy duplicates and the Cover Test track were removed through guarded worker jobs after explicit approval; the library has no unresolved hashes or exact SHA-256 duplicate groups.
 - The `antolex-music` R2 bucket is created, scoped credentials and CORS are configured, all 13 legacy objects are copied, and key/size plus full SHA-256 verification passed. The local API and worker now use the new bucket; the old bucket remains intact for the required seven-day rollback window.
 - `antolex.net` is an active Mailjet sending domain with SPF, DKIM, and DMARC published in Cloudflare. Local sign-in email now comes from `ANTOLEX Music <auth@antolex.net>` and was verified in Gmail Inbox.
 - The GitHub repository is renamed to `alexeytozik/antolex-music` and the local `origin` uses the new URL. Production deployment/DNS, duplicate merge/deletion, and old-bucket deletion remain behind the safety gates below.
@@ -43,7 +43,7 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 - Embedded artwork is preserved whenever the source contains it; files without an image stream receive distinct metadata-derived ANTOLEX covers without pretending they are official album artwork.
 - Ordered and liked playback queues continue through cursor pages while retaining only a bounded consumed history. Shuffle uses a signed, indexed server cursor across the complete ready library, and transient stream/network failures recover automatically without a manual Retry.
 - The CI/deploy workflow and release-layout runbook use four repository secrets and the server-side `/home/atozik/antolex-music/shared/.env`. Every successful `main` run publishes an immutable release and keeps application secrets outside GitHub.
-- Production is live at `music.antolex.net`. Before consolidation, the shared R2 bucket contains 29 tracks' media while production PostgreSQL knows 16 tracks and the local PostgreSQL knows all 29; automatic bucket scanning remains intentionally disabled.
+- Production is live at `music.antolex.net` and is the only catalog source of truth: 29 ready tracks, 29 canonical playback objects, 12 stored covers, no original references, and no duplicate SHA-256 groups. Automatic bucket scanning remains intentionally disabled.
 
 ## Safety gates
 

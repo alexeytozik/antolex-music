@@ -57,19 +57,9 @@ sudo docker compose \
   --profile production config --quiet
 ```
 
-## Backup and migration gate
+## Legacy migration gate
 
-Create a full database backup before starting the new code:
-
-```bash
-cd /home/atozik/antolex-music/current
-sudo env \
-  -u DATABASE_URL \
-  ANTOLEX_BACKUP_DIR=/home/atozik/antolex-music/shared/backups/postgres \
-  ./scripts/backup-postgres.sh
-```
-
-Copy the `.dump` and `.sha256` files to independent storage and verify the checksum there. Generate the full-file legacy manifest, review its JSON duplicate groups, and run the canonical backfill in its default rollback mode:
+Generate the full-file legacy manifest, review its JSON duplicate groups, and run the canonical backfill in its default rollback mode:
 
 ```bash
 ANTOLEX_REPORT_DIR=./migration-reports ./scripts/legacy-r2-hash-report.sh

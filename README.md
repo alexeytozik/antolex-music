@@ -22,7 +22,7 @@ Embedded cover art is shown unchanged when the audio contains it. If no image is
 apps/web             React, Vite, Tailwind, Zustand
 services/api         Go, Fiber, PostgreSQL, Redis, R2
 services/api/db      versioned PostgreSQL migrations
-scripts              backup and read-only migration reports
+scripts              deployment and read-only migration reports
 ops                  production and R2 migration runbooks
 Caddyfile             TLS entry point for music.antolex.net
 ```
@@ -77,7 +77,6 @@ Manrope is bundled into the production assets from the local `@fontsource-variab
 
 - [Single-server production runbook](ops/production-runbook.md)
 - [R2 copy and verification runbook](ops/r2-migration.md)
-- `scripts/backup-postgres.sh` creates and validates a full custom-format PostgreSQL dump; it never prunes old backups.
 - `scripts/duplicate-report.sh` previews duplicate groups among hashes already stored in PostgreSQL; NULL legacy rows require the manifest report below. It never updates or deletes data.
 - `scripts/legacy-r2-hash-report.sh` streams legacy R2 objects through SHA-256 and writes a local canonical/duplicate report without changing PostgreSQL or R2.
 - `scripts/backfill-legacy-sha256.sh` validates that manifest and, only with explicit `--apply`, stores each hash on its earliest canonical row. Legacy duplicate rows and their likes remain untouched, while future uploads of the same bytes can return `409 duplicate_track`.
