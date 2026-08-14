@@ -74,12 +74,12 @@ export function Shell() {
   async function signOut() {
     if (signingOut) return;
     setSigningOut(true);
+    clearSession();
     try {
       await api.logout();
     } catch {
-      // The local session must still be cleared when the cookie already expired.
+      // Local playback and uploads are already stopped even if the cookie expired.
     } finally {
-      clearSession();
       setSigningOut(false);
     }
   }

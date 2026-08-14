@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { Shell } from "./components/Shell";
 import { QueueContinuation } from "./components/QueueContinuation";
+import { UploadManagerProvider } from "./components/UploadManager";
 import { APIError, api } from "./lib/api";
 import {
   removeLegacyPlayerStorage,
@@ -69,20 +70,29 @@ function SessionBootstrap({ onReady }: { onReady: () => void }) {
 
 export default function App() {
   const [sessionReady, setSessionReady] = useState(false);
+  const userID = usePlayerStore((state) => state.user?.id);
+  const clearSession = usePlayerStore((state) => state.clearSession);
   return (
     <>
       <SessionBootstrap onReady={() => setSessionReady(true)} />
       <QueueContinuation />
-      <Routes>
-        <Route element={<Shell />}>
-          <Route path="/" element={<PrivateRoute ready={sessionReady}><SearchView /></PrivateRoute>} />
-          <Route path="/liked" element={<PrivateRoute ready={sessionReady}><LikedSongsView /></PrivateRoute>} />
-          <Route path="/add" element={<PrivateRoute ready={sessionReady}><AddView /></PrivateRoute>} />
-          <Route path="/profile" element={<ProfileView />} />
-          <Route path="/auth" element={<Navigate to="/profile" replace />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Route>
-      </Routes>
+      <UploadManagerProvider
+        key={userID ?? "guest"}
+        enabled={sessionReady && !!userID}
+        userKey={userID}
+        onUnauthorized={clearSession}
+      >
+        <Routes>
+          <Route element={<Shell />}>
+            <Route path="/" element={<PrivateRoute ready={sessionReady}><SearchView /></PrivateRoute>} />
+            <Route path="/liked" element={<PrivateRoute ready={sessionReady}><LikedSongsView /></PrivateRoute>} />
+            <Route path="/add" element={<PrivateRoute ready={sessionReady}><AddView /></PrivateRoute>} />
+            <Route path="/profile" element={<ProfileView />} />
+            <Route path="/auth" element={<Navigate to="/profile" replace />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
+      </UploadManagerProvider>
     </>
   );
 }

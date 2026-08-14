@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { PersistedUpload } from "./upload-db";
-import { restoreUploadQueue } from "./upload-queue";
+import {
+  reconcileSelectedFiles,
+  restoreUploadQueue,
+  type UploadQueueItem,
+} from "./upload-queue";
 import type { UploadSession } from "../types";
 
 function persisted(localId: string, status: string, sessionId?: string): PersistedUpload {
@@ -33,6 +37,35 @@ function remote(id: string, status: UploadSession["status"]): UploadSession {
   };
 }
 
+function queueItem(
+  localId: string,
+  overrides: Partial<UploadQueueItem> = {},
+): UploadQueueItem {
+  return {
+    localId,
+    fileName: `${localId}.mp3`,
+    sizeBytes: 1024,
+    contentType: "audio/mpeg",
+    lastModified: 1,
+    status: "needs_file",
+    progress: 0,
+    uploadedParts: [],
+    createdAt: "2026-08-14T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function selectedFile(
+  name: string,
+  size = 1024,
+  lastModified = 1,
+) {
+  return new File([new Uint8Array(size)], name, {
+    type: "audio/mpeg",
+    lastModified,
+  });
+}
+
 describe("upload queue restoration", () => {
   it("discards ten thousand completed rows instead of rendering them", () => {
     const history = Array.from({ length: 10_000 }, (_, index) => persisted(`ready-${index}`, "ready", `session-${index}`));
@@ -61,5 +94,97 @@ describe("upload queue restoration", () => {
     expect(result.items).toEqual([]);
     expect(result.discardedLocalIds).toEqual(["was-processing"]);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("reselected upload reconciliation", () => {
+  it("matches a complete 50-file batch to 50 needs-file rows", () => {
+    const items = Array.from({ length: 50 }, (_, index) =>
+      queueItem(`track-${index}`),
+    );
+    const files = items.map((item) =>
+      selectedFile(item.fileName, item.sizeBytes, item.lastModified),
+    );
+
+    const result = reconcileSelectedFiles(items, files);
+
+    expect(result.matches).toHaveLength(50);
+    expect(result.unmatched).toEqual([]);
+    expect(new Set(result.matches.map(({ itemIndex }) => itemIndex)).size).toBe(50);
+    expect(result.matches.map(({ file }) => file)).toEqual(files);
+  });
+
+  it("reserves each needs-file row at most once", () => {
+    const items = [queueItem("song")];
+    const first = selectedFile("song.mp3");
+    const second = selectedFile("song.mp3");
+
+    const result = reconcileSelectedFiles(items, [first, second]);
+
+    expect(result.matches).toEqual([{ itemIndex: 0, file: first }]);
+    expect(result.unmatched).toEqual([second]);
+  });
+
+  it("uses last-modified time to disambiguate equal names and sizes", () => {
+    const items = [
+      queueItem("older", {
+        fileName: "same.mp3",
+        lastModified: 10,
+      }),
+      queueItem("newer", {
+        fileName: "same.mp3",
+        lastModified: 20,
+      }),
+    ];
+    const file = selectedFile("same.mp3", 1024, 20);
+
+    const result = reconcileSelectedFiles(items, [file]);
+
+    expect(result.matches).toEqual([{ itemIndex: 1, file }]);
+    expect(result.unmatched).toEqual([]);
+  });
+
+  it("does not guess when multiple rows are compatible but none is exact", () => {
+    const items = [
+      queueItem("first", {
+        fileName: "same.mp3",
+        lastModified: 10,
+      }),
+      queueItem("second", {
+        fileName: "same.mp3",
+        lastModified: 20,
+      }),
+    ];
+    const file = selectedFile("same.mp3", 1024, 30);
+
+    const result = reconcileSelectedFiles(items, [file]);
+
+    expect(result.matches).toEqual([]);
+    expect(result.unmatched).toEqual([file]);
+  });
+
+  it("falls back to the only compatible row when last-modified changed", () => {
+    const items = [
+      queueItem("song", {
+        fileName: "renamed-date.mp3",
+        lastModified: 10,
+      }),
+    ];
+    const file = selectedFile("renamed-date.mp3", 1024, 20);
+
+    const result = reconcileSelectedFiles(items, [file]);
+
+    expect(result.matches).toEqual([{ itemIndex: 0, file }]);
+    expect(result.unmatched).toEqual([]);
+  });
+
+  it("never matches a file to a non-needs-file row", () => {
+    const items = [queueItem("song", { status: "processing" })];
+    const file = selectedFile("song.mp3");
+
+    const result = reconcileSelectedFiles(items, [file]);
+
+    expect(result.matches).toEqual([]);
+    expect(result.unmatched).toEqual([file]);
   });
 });

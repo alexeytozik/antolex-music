@@ -180,11 +180,12 @@ export const api = {
     size_bytes: number;
     content_type: string;
     sha256: string;
-  }) {
+  }, signal?: AbortSignal) {
     return unwrapUpload(
       await request<UploadSessionEnvelope>("/me/uploads", {
         method: "POST",
         body: JSON.stringify(payload),
+        signal,
       }),
     );
   },
@@ -201,24 +202,25 @@ export const api = {
     } while (cursor);
     return uploads;
   },
-  async getUpload(id: string) {
+  async getUpload(id: string, signal?: AbortSignal) {
     return unwrapUpload(
       await request<UploadSessionEnvelope>(
         `/me/uploads/${encodeURIComponent(id)}`,
+        { signal },
       ),
     );
   },
-  getUploadPartURL(id: string, partNumber: number) {
+  getUploadPartURL(id: string, partNumber: number, signal?: AbortSignal) {
     return request<UploadPartURL>(
       `/me/uploads/${encodeURIComponent(id)}/parts/${partNumber}`,
-      { method: "POST" },
+      { method: "POST", signal },
     );
   },
-  async completeUpload(id: string, parts: UploadedPart[]) {
+  async completeUpload(id: string, parts: UploadedPart[], signal?: AbortSignal) {
     return unwrapUpload(
       await request<UploadSessionEnvelope>(
         `/me/uploads/${encodeURIComponent(id)}/complete`,
-        { method: "POST", body: JSON.stringify({ parts }) },
+        { method: "POST", body: JSON.stringify({ parts }), signal },
       ),
     );
   },
@@ -245,20 +247,30 @@ export function putUploadPart(
 ): Promise<{ etag: string }> {
   const url = target.upload_url ?? target.url;
   if (!url) return Promise.reject(new Error("Upload URL is missing"));
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("Upload paused", "AbortError"));
+  }
 
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     const abort = () => xhr.abort();
+    const cleanup = () => signal.removeEventListener("abort", abort);
     signal.addEventListener("abort", abort, { once: true });
     xhr.open("PUT", url);
     Object.entries(target.headers ?? {}).forEach(([name, value]) => {
       xhr.setRequestHeader(name, value);
     });
     xhr.upload.onprogress = (event) => onProgress(event.loaded);
-    xhr.onerror = () => reject(new Error("Network error while uploading"));
-    xhr.onabort = () => reject(new DOMException("Upload paused", "AbortError"));
+    xhr.onerror = () => {
+      cleanup();
+      reject(new Error("Network error while uploading"));
+    };
+    xhr.onabort = () => {
+      cleanup();
+      reject(new DOMException("Upload paused", "AbortError"));
+    };
     xhr.onload = () => {
-      signal.removeEventListener("abort", abort);
+      cleanup();
       if (xhr.status < 200 || xhr.status >= 300) {
         reject(new Error(`Object storage returned ${xhr.status}`));
         return;

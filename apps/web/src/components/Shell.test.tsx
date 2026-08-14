@@ -1,14 +1,24 @@
+import { act } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { api } from "../lib/api";
 import { usePlayerStore } from "../store/player-store";
 import { Shell } from "./Shell";
 
 vi.mock("./Player", () => ({ Player: () => null }));
 
 const mountedRoots: Root[] = [];
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+}
 
 function renderShell() {
   const container = document.createElement("div");
@@ -37,6 +47,7 @@ afterEach(() => {
     queue: [],
     currentIndex: -1,
   });
+  vi.restoreAllMocks();
 });
 
 describe("Shell navigation", () => {
@@ -66,5 +77,33 @@ describe("Shell navigation", () => {
     expect(container.querySelector('[href="/profile"][aria-label="Sign in"]')).not.toBeNull();
     expect(container.textContent).toContain("Sign in");
     expect(container.querySelector('[aria-label="Main navigation"]')).toBeNull();
+  });
+
+  it("clears the local session before the remote logout request settles", async () => {
+    const logout = deferred<void>();
+    vi.spyOn(api, "logout").mockReturnValue(logout.promise);
+    usePlayerStore.setState({
+      user: {
+        id: "user-1",
+        email: "listener@example.com",
+        created_at: "2026-08-14T00:00:00Z",
+      },
+    });
+    const container = renderShell();
+
+    flushSync(() => {
+      container.querySelector<HTMLButtonElement>(
+        '[aria-label="Signed in as listener@example.com. Sign out"]',
+      )!.click();
+    });
+
+    expect(api.logout).toHaveBeenCalledTimes(1);
+    expect(usePlayerStore.getState().user).toBeNull();
+    expect(container.querySelector('[href="/profile"][aria-label="Sign in"]')).not.toBeNull();
+
+    await act(async () => {
+      logout.resolve();
+      await logout.promise;
+    });
   });
 });

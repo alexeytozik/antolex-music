@@ -32,6 +32,16 @@ export type UploadQueueItem = {
   createdAt: string;
 };
 
+export type SelectedFileMatch = {
+  itemIndex: number;
+  file: File;
+};
+
+export type SelectedFileReconciliation = {
+  matches: SelectedFileMatch[];
+  unmatched: File[];
+};
+
 export function isHiddenTerminalStatus(status: string) {
   return status === "ready" || status === "cancelled";
 }
@@ -43,8 +53,51 @@ export function serverUploadStatus(session: UploadSession): LocalUploadStatus {
   return session.status === "deleting" ? "cancelled" : session.status;
 }
 
-export function toPersistedUpload(item: UploadQueueItem): PersistedUpload {
+/**
+ * Match files selected after a reload with durable queue rows before callers
+ * apply the queue capacity limit. A row can only consume one selected file.
+ */
+export function reconcileSelectedFiles(
+  items: UploadQueueItem[],
+  selectedFiles: File[],
+): SelectedFileReconciliation {
+  const availableIndexes = new Set(
+    items
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => item.status === "needs_file")
+      .map(({ index }) => index),
+  );
+  const matches: SelectedFileMatch[] = [];
+  const unmatched: File[] = [];
+
+  for (const file of selectedFiles) {
+    const candidates = Array.from(availableIndexes);
+    const exactIndex = candidates.find((index) => {
+      const item = items[index];
+      return item.fileName === file.name &&
+        item.sizeBytes === file.size &&
+        item.lastModified === file.lastModified;
+    });
+    const compatibleIndexes = candidates.filter((index) => {
+      const item = items[index];
+      return item.fileName === file.name && item.sizeBytes === file.size;
+    });
+    const itemIndex = exactIndex ?? (compatibleIndexes.length === 1 ? compatibleIndexes[0] : undefined);
+
+    if (itemIndex === undefined) {
+      unmatched.push(file);
+      continue;
+    }
+    availableIndexes.delete(itemIndex);
+    matches.push({ itemIndex, file });
+  }
+
+  return { matches, unmatched };
+}
+
+export function toPersistedUpload(item: UploadQueueItem, ownerID: string): PersistedUpload {
   return {
+    owner_id: ownerID,
     local_id: item.localId,
     session_id: item.sessionId,
     file_name: item.fileName,
