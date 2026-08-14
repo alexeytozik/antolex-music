@@ -66,11 +66,6 @@ func New(cfg config.Config) (*fiber.App, func(), error) {
 		db:    db,
 		redis: redisClient,
 	}
-	if err := srv.bootstrapAccessList(context.Background()); err != nil {
-		_ = redisClient.Close()
-		db.Close()
-		return nil, nil, fmt.Errorf("bootstrap access list: %w", err)
-	}
 	if catalog, err := newSeedCatalog(cfg); err == nil {
 		srv.seedCatalog = catalog
 	}

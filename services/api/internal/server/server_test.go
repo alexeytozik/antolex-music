@@ -551,6 +551,38 @@ func TestAuthCodeLocksAtomicallyOnFifthMismatch(t *testing.T) {
 	}
 }
 
+func TestRequestCodeAcceptsUnregisteredEmail(t *testing.T) {
+	t.Parallel()
+	cache := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: cache.Addr()})
+	defer redisClient.Close()
+
+	srv := &Server{
+		cfg: config.Config{
+			AppEnv:      "development",
+			JWTSecret:   "test-secret",
+			AuthCodeTTL: time.Minute,
+		},
+		redis: redisClient,
+	}
+	app := fiber.New()
+	app.Post("/auth/request-code", srv.requestCode)
+	req := httptest.NewRequest(http.MethodPost, "/auth/request-code", strings.NewReader(`{"email":"New.User@Example.com"}`))
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	response, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request code: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusNoContent {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	if redisClient.Exists(context.Background(), authCodeKey("new.user@example.com")).Val() != 1 {
+		t.Fatalf("verification code was not stored for the unregistered email")
+	}
+}
+
 func TestSupportedAudioUploadUsesAllowlistedExtensions(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"track.mp3", "track.m4a", "track.aac", "track.flac", "track.ogg", "track.wav"} {

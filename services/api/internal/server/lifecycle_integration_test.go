@@ -93,6 +93,39 @@ func TestConcurrentTrackSHA256Constraint(t *testing.T) {
 	}
 }
 
+func TestVerifiedEmailCreatesAndReactivatesUser(t *testing.T) {
+	db := newLifecycleTestDB(t)
+	ctx := context.Background()
+	srv := &Server{db: db}
+
+	created, err := srv.upsertVerifiedUser(ctx, " New.Listener@Example.com ")
+	if err != nil {
+		t.Fatalf("create verified user: %v", err)
+	}
+	if created.ID == "" || created.Email != "new.listener@example.com" || !created.Active {
+		t.Fatalf("unexpected created user: %+v", created)
+	}
+
+	if _, err := db.Exec(ctx, `UPDATE users SET active=FALSE WHERE id=$1`, created.ID); err != nil {
+		t.Fatalf("disable user: %v", err)
+	}
+	reactivated, err := srv.upsertVerifiedUser(ctx, "NEW.LISTENER@EXAMPLE.COM")
+	if err != nil {
+		t.Fatalf("reactivate verified user: %v", err)
+	}
+	if reactivated.ID != created.ID || !reactivated.Active {
+		t.Fatalf("unexpected reactivated user: %+v", reactivated)
+	}
+
+	var count int
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE email=$1`, "new.listener@example.com").Scan(&count); err != nil {
+		t.Fatalf("count verified users: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("verified user rows=%d; want 1", count)
+	}
+}
+
 func TestUploadResumeCancelAndRetryLifecycle(t *testing.T) {
 	db := newLifecycleTestDB(t)
 	ctx := context.Background()

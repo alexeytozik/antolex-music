@@ -20,7 +20,6 @@ type Config struct {
 	AuthCodeTTL       time.Duration
 	SessionTTL        time.Duration
 	UploadSessionTTL  time.Duration
-	AccessEmails      []string
 	CookieName        string
 	CookieSecure      bool
 	SMTPHost          string
@@ -48,7 +47,6 @@ func Load() Config {
 		AuthCodeTTL:       getDuration("AUTH_CODE_TTL", 10*time.Minute),
 		SessionTTL:        getDuration("SESSION_TTL", 30*24*time.Hour),
 		UploadSessionTTL:  getDuration("UPLOAD_SESSION_TTL", 7*24*time.Hour),
-		AccessEmails:      splitCSV(getEnv("ACCESS_EMAILS", getEnv("ADMIN_EMAILS", ""))),
 		CookieName:        getEnv("SESSION_COOKIE_NAME", "antolex_session"),
 		CookieSecure:      getBool("SESSION_COOKIE_SECURE", getEnv("APP_ENV", "development") == "production"),
 		SMTPHost:          getEnv("SMTP_HOST", ""),

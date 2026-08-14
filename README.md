@@ -61,11 +61,10 @@ The root [`.env.example`](.env.example) documents application, cookie, SMTP, R2,
 - a random `JWT_SECRET` of at least 32 bytes;
 - `APP_ENV=production` and `SESSION_COOKIE_SECURE=true`;
 - `CORS_ORIGINS=https://music.antolex.net`;
-- `ACCESS_EMAILS` containing the initial allowed email addresses. Older deployments may keep using `ADMIN_EMAILS` as a fallback;
 - `R2_BUCKET_NAME=antolex-music`;
 - a verified SMTP sender such as `auth@antolex.net`.
 
-The six-digit email code expires after 10 minutes. A successful sign-in creates a 30-day `HttpOnly`, `Secure`, `SameSite=Lax` cookie. Only active allowlisted users can sign in. `ACCESS_EMAILS` (or the legacy `ADMIN_EMAILS` fallback) bootstraps and reactivates permitted addresses; revocation is an operational PostgreSQL action because the application exposes no user management. The header shows direct sign-in/session controls instead of a Profile destination. Signed-in users can browse, like, play, and upload music; likes are isolated by user, while published tracks cannot be edited or deleted through the user-facing API.
+The six-digit email code expires after 10 minutes. Any valid email address can request a code; the account is created or reactivated only after successful verification. A successful sign-in creates a 30-day `HttpOnly`, `Secure`, `SameSite=Lax` cookie. The header shows direct sign-in/session controls instead of a Profile destination. Signed-in users can browse, like, play, and upload music; likes are isolated by user, while published tracks cannot be edited or deleted through the user-facing API.
 
 ## Brand assets
 

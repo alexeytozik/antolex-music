@@ -2,7 +2,7 @@
 
 ## Goal
 
-Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web application with resumable direct-to-R2 uploads, exact SHA-256 duplicate prevention, durable media processing, a configuration-managed access list, and a complete brand replacement.
+Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web application with resumable direct-to-R2 uploads, exact SHA-256 duplicate prevention, durable media processing, open email-code registration, and a complete brand replacement.
 
 ## Milestones
 
@@ -15,11 +15,12 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 7. Restore the wide desktop listening experience from the original Tozikron UI while keeping the mobile application as a deliberately separate interface: desktop header navigation, horizontal catalog rows, and a full-width fixed player at 900 px and above; mobile bottom navigation, mini-player, and full-screen player below 900 px.
 8. Use the same cursor-based infinite catalog on desktop and mobile, fetching 20 tracks at a time. Keep the desktop header on one line with a larger wordmark and a single Add/Profile entry point. Limit every new audio file to 50 MiB in the browser, API, and database.
 9. Simplify the visual system: one outline per component, restrained 8–14 px corner radii for fields and surfaces, rectangular action buttons, and circular geometry only for icon/media controls.
-10. Keep published tracks immutable in the user application and remove the signed-in Profile destination. Show only direct `Sign in` or `Signed in` / `Sign out` controls in the header; retain `/profile` solely for the guest email-code form. Remove track edit/delete, failed-operation controls, and user-management routes; bootstrap or reactivate permitted addresses through `ACCESS_EMAILS`, with revocation handled operationally in PostgreSQL.
+10. Keep published tracks immutable in the user application and remove the signed-in Profile destination. Show only direct `Sign in` or `Signed in` / `Sign out` controls in the header; retain `/profile` solely for the guest email-code form. Remove track edit/delete, failed-operation controls, and user-management routes.
 11. Preserve embedded artwork when it exists and render a deterministic 512 px ANTOLEX cover from track metadata when an audio file has no artwork, so missing source images no longer collapse the catalog into one repeated placeholder.
 12. Make playback resilient without adding new screens: automatically recover a stream after transient network failures, extend a catalog-backed queue before it reaches the last loaded page, and make shuffle cover the complete matching library rather than only tracks already rendered in the feed. Preserve the current track, position, play intent, likes, search ordering, Media Session controls, and persisted player state.
 13. Add GitHub Actions on the public repository for frontend tests/build, backend test/vet, and production Compose validation. Serialize deployments from `main`, transfer a checksummed release over strict-host-key SSH without third-party deployment actions, activate only after health checks, and keep versioned releases with a shared production environment.
 14. Consolidate the live library around production as the only source of truth. Merge the 13 verified local-only tracks without re-uploading their existing R2 media, retain one canonical M4A playback object plus an optional cover per track, migrate the four legacy `library/` objects, remove verified originals and smoke-test data, and retire the local Docker database immediately after production validation.
+15. Allow any valid email address to request a one-time code. Create or reactivate the user only after the code is verified successfully, while keeping likes isolated by user ID and all authenticated product permissions equal.
 
 ## Production consolidation (completed)
 
@@ -38,7 +39,7 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 - `antolex.net` is an active Mailjet sending domain with SPF, DKIM, and DMARC published in Cloudflare. Local sign-in email now comes from `ANTOLEX Music <auth@antolex.net>` and was verified in Gmail Inbox.
 - The GitHub repository is renamed to `alexeytozik/antolex-music` and the local `origin` uses the new URL. Production deployment/DNS, duplicate merge/deletion, and old-bucket deletion remain behind the safety gates below.
 - The responsive presentation has two explicit modes. Desktop keeps the visual rhythm of the original player and catalog, updated to the ANTOLEX brand; mobile keeps the touch-first navigation and player designed for iOS and Android.
-- Every active allowlisted user can browse, like, play, and upload music. The application exposes no roles, published-track management, or user-management controls.
+- Any user who verifies a valid email address can browse, like, play, and upload music. The application exposes no roles, published-track management, or user-management controls.
 - Likes remain private to each account through the `(user_id, track_id)` key; the mobile navigation contains only Search, Liked, and Add.
 - Embedded artwork is preserved whenever the source contains it; files without an image stream receive distinct metadata-derived ANTOLEX covers without pretending they are official album artwork.
 - Ordered and liked playback queues continue through cursor pages while retaining only a bounded consumed history. Shuffle uses a signed, indexed server cursor across the complete ready library, and transient stream/network failures recover automatically without a manual Retry.

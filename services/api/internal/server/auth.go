@@ -116,10 +116,6 @@ func (s *Server) requestCode(c *fiber.Ctx) error {
 	if !isValidEmail(email) {
 		return fiber.NewError(fiber.StatusBadRequest, "valid email is required")
 	}
-	user, err := s.userByEmail(ctx, email)
-	if err != nil || !user.Active {
-		return writeAPIError(c, fiber.StatusForbidden, "access_denied", "This email has not been granted access", nil)
-	}
 	reserved, err := s.redis.SetNX(ctx, authCooldownKey(email), "1", authResendDelay).Result()
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to apply resend limit")
@@ -185,9 +181,9 @@ func (s *Server) verifyCode(c *fiber.Ctx) error {
 		)
 	}
 
-	user, err := s.userByEmail(ctx, email)
-	if err != nil || !user.Active {
-		return writeAPIError(c, fiber.StatusForbidden, "access_denied", "This email has not been granted access", nil)
+	user, err := s.upsertVerifiedUser(ctx, email)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to create user")
 	}
 
 	token, expiresAt, err := s.signToken(user.ID, user.Email)
@@ -218,30 +214,16 @@ func (s *Server) consumeAuthCode(ctx context.Context, email, expectedHash string
 	return authCodeCheckResult(result), err
 }
 
-func (s *Server) userByEmail(ctx context.Context, email string) (models.User, error) {
+func (s *Server) upsertVerifiedUser(ctx context.Context, email string) (models.User, error) {
 	var user models.User
 	err := s.db.QueryRow(ctx, `
-		SELECT id::text, email, active, created_at
-		FROM users WHERE lower(email) = lower($1)
+		INSERT INTO users (email, password_hash, active)
+		VALUES ($1, '', TRUE)
+		ON CONFLICT (email) DO UPDATE
+		SET active = TRUE, updated_at = NOW()
+		RETURNING id::text, email, active, created_at
 	`, normalizeEmail(email)).Scan(&user.ID, &user.Email, &user.Active, &user.CreatedAt)
 	return user, err
-}
-
-func (s *Server) bootstrapAccessList(ctx context.Context) error {
-	for _, rawEmail := range s.cfg.AccessEmails {
-		email := normalizeEmail(rawEmail)
-		if !isValidEmail(email) {
-			return fmt.Errorf("invalid access-list email %q", rawEmail)
-		}
-		if _, err := s.db.Exec(ctx, `
-			INSERT INTO users (email, password_hash, active)
-			VALUES ($1, '', TRUE)
-			ON CONFLICT (email) DO UPDATE SET active = TRUE, updated_at = NOW()
-		`, email); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *Server) setSessionCookie(c *fiber.Ctx, token string, expiresAt time.Time) {
