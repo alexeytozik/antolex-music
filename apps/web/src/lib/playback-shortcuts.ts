@@ -1,33 +1,48 @@
-const INTERACTIVE_TARGET_SELECTOR = [
-  "a[href]",
-  "button",
+const VALUE_EDITING_TARGET_SELECTOR = [
   "input",
   "select",
   "textarea",
-  "summary",
-  "audio[controls]",
-  "video[controls]",
   "[contenteditable]:not([contenteditable='false'])",
-  "[role='button']",
   "[role='checkbox']",
   "[role='combobox']",
-  "[role='link']",
-  "[role='menuitem']",
   "[role='option']",
   "[role='radio']",
   "[role='slider']",
   "[role='spinbutton']",
   "[role='switch']",
-  "[role='tab']",
   "[role='textbox']",
-  "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
-export function isGlobalPlaybackShortcut(event: KeyboardEvent) {
-  const isSpace =
-    event.code === "Space" || event.key === " " || event.key === "Spacebar";
+const NATIVE_SPACE_TARGET_SELECTOR = [
+  "button",
+  "summary",
+  "audio[controls]",
+  "video[controls]",
+  "[role='button']",
+  "[role='menuitem']",
+  "[role='tab']",
+].join(",");
+
+export function isSpaceKey(event: KeyboardEvent) {
+  return event.code === "Space" || event.key === " " || event.key === "Spacebar";
+}
+
+function eventPathContains(event: KeyboardEvent, selector: string) {
+  const path = event.composedPath();
+  const elements = path.length ? path : [event.target];
+  return elements.some(
+    (target) =>
+      target instanceof Element &&
+      (target.matches(selector) || Boolean(target.closest(selector))),
+  );
+}
+
+export function isGlobalPlaybackShortcut(
+  event: KeyboardEvent,
+  keyboardNavigation = false,
+) {
   if (
-    !isSpace ||
+    !isSpaceKey(event) ||
     event.defaultPrevented ||
     event.isComposing ||
     event.altKey ||
@@ -38,12 +53,9 @@ export function isGlobalPlaybackShortcut(event: KeyboardEvent) {
     return false;
   }
 
-  const path = event.composedPath();
-  const elements = path.length ? path : [event.target];
-  return !elements.some(
-    (target) =>
-      target instanceof Element &&
-      (target.matches(INTERACTIVE_TARGET_SELECTOR) ||
-        Boolean(target.closest(INTERACTIVE_TARGET_SELECTOR))),
+  if (eventPathContains(event, VALUE_EDITING_TARGET_SELECTOR)) return false;
+  return !(
+    keyboardNavigation &&
+    eventPathContains(event, NATIVE_SPACE_TARGET_SELECTOR)
   );
 }

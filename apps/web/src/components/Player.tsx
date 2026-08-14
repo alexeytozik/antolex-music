@@ -50,7 +50,7 @@ export function Player() {
   const mountedRef = useRef(false);
   const lastPositionRef = useRef(0);
   const expandedOpenerRef = useRef<HTMLElement | null>(null);
-  const closeExpandedRef = useRef<HTMLButtonElement | null>(null);
+  const fullPlayRef = useRef<HTMLButtonElement | null>(null);
   const [expanded, setExpanded] = useState(false);
   const currentItem = usePlayerStore(selectCurrentItem);
   const hasPlayerNext = usePlayerStore(selectHasNext);
@@ -326,7 +326,7 @@ export function Player() {
 
   useEffect(() => {
     if (!expanded) return;
-    closeExpandedRef.current?.focus();
+    fullPlayRef.current?.focus();
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -540,7 +540,7 @@ export function Player() {
               <span><strong>{track.title}</strong><small>{track.artist}</small></span>
               {(status === "resolving" || status === "retrying") && <SpinnerIcon className="h-5 w-5 animate-spin" />}
             </button>
-            <button className="player-button" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"}>{isPlaying ? <PauseIcon className="h-6 w-6" /> : <PlayIcon className="h-6 w-6" />}</button>
+            <button className="player-button" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"} aria-keyshortcuts="Space">{isPlaying ? <PauseIcon className="h-6 w-6" /> : <PlayIcon className="h-6 w-6" />}</button>
             <button className="player-button mobile-next" type="button" onClick={() => { void next(); }} disabled={!hasNext} aria-label="Next track"><NextIcon className="h-6 w-6" /></button>
             <div className="mini-progress"><span style={{ width: `${progressPercent}%` }} /></div>
           </div>
@@ -548,7 +548,7 @@ export function Player() {
 
         {expanded && track && (
           <section className="full-player" role="dialog" aria-modal="true" aria-label="Now playing">
-            <header><button ref={closeExpandedRef} className="icon-button" type="button" onClick={closeExpandedPlayer}><ChevronDownIcon className="h-6 w-6" /><span className="sr-only">Close player</span></button><strong>Now playing</strong><span /></header>
+            <header><button className="icon-button" type="button" onClick={closeExpandedPlayer}><ChevronDownIcon className="h-6 w-6" /><span className="sr-only">Close player</span></button><strong>Now playing</strong><span /></header>
             <div className="full-player-content">
               <img className="full-cover" src={track.cover_url || "/cover-fallback.svg"} alt="" onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = "/cover-fallback.svg"; }} />
               <div className="full-track-copy"><h2>{track.title}</h2><p>{track.artist}{track.album ? ` · ${track.album}` : ""}</p></div>
@@ -556,7 +556,7 @@ export function Player() {
               <div className="full-controls">
                 <button className={`player-button ${shuffle ? "active" : ""}`} type="button" onClick={() => setShuffle(!shuffle)} aria-label="Shuffle" aria-pressed={shuffle}><ShuffleIcon className="h-6 w-6" /></button>
                 <button className="player-button" type="button" onClick={previous} disabled={!hasPrevious} aria-label="Previous"><PreviousIcon className="h-7 w-7" /></button>
-                <button className="play-main" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"}>{isPlaying ? <PauseIcon className="h-8 w-8" /> : <PlayIcon className="h-8 w-8" />}</button>
+                <button ref={fullPlayRef} className="play-main" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"} aria-keyshortcuts="Space">{isPlaying ? <PauseIcon className="h-8 w-8" /> : <PlayIcon className="h-8 w-8" />}</button>
                 <button className="player-button" type="button" onClick={() => { void next(); }} disabled={!hasNext} aria-label="Next"><NextIcon className="h-7 w-7" /></button>
                 <span className="control-spacer" />
               </div>
@@ -582,7 +582,7 @@ export function Player() {
             <div className="desktop-player-controls">
               <button className={`player-button ${shuffle ? "active" : ""}`} type="button" onClick={() => setShuffle(!shuffle)} disabled={!track} aria-label="Shuffle" aria-pressed={shuffle}><ShuffleIcon className="h-6 w-6" /></button>
               <button className="player-button outlined" type="button" onClick={previous} disabled={!hasPrevious} aria-label="Previous"><PreviousIcon className="h-6 w-6" /></button>
-              <button className="play-main desktop-play-main" type="button" onClick={togglePlayback} disabled={!track} aria-label={isPlaying ? "Pause" : "Play"}>{isPlaying ? <PauseIcon className="h-7 w-7" /> : <PlayIcon className="h-7 w-7" />}</button>
+              <button className="play-main desktop-play-main" type="button" onClick={togglePlayback} disabled={!track} aria-label={isPlaying ? "Pause" : "Play"} aria-keyshortcuts="Space">{isPlaying ? <PauseIcon className="h-7 w-7" /> : <PlayIcon className="h-7 w-7" />}</button>
               <button className="player-button outlined" type="button" onClick={() => { void next(); }} disabled={!hasNext} aria-label="Next"><NextIcon className="h-6 w-6" /></button>
             </div>
 

@@ -22,7 +22,7 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 14. Consolidate the live library around production as the only source of truth. Merge the 13 verified local-only tracks without re-uploading their existing R2 media, retain one canonical M4A playback object plus an optional cover per track, migrate the four legacy `library/` objects, remove verified originals and smoke-test data, and retire the local Docker database immediately after production validation.
 15. Allow any valid email address to request a one-time code. Create or reactivate the user only after the code is verified successfully, while keeping likes isolated by user ID and all authenticated product permissions equal.
 16. Keep Add as an operational queue rather than permanent upload history: hide successful and cancelled entries, retain actionable errors and duplicates until dismissal, and purge terminal upload metadata and successful jobs after one hour without touching published tracks, media, or likes.
-17. Make playback controls consistent across mouse, touch, keyboard, and media keys: selecting the current track toggles pause/resume without rebuilding its queue or losing position, while Space controls playback only outside fields and other interactive controls.
+17. Make playback controls consistent across mouse, touch, keyboard, and media keys: selecting the current track toggles pause/resume without rebuilding its queue or losing position. Space is a global play/pause shortcut after pointer navigation, while text editing, value controls, and buttons reached deliberately with Tab retain their native keyboard behavior.
 
 ## Production consolidation (completed)
 

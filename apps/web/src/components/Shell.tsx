@@ -1,10 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 
 import { HeartIcon, LogOutIcon, PlusIcon, SearchIcon, UserIcon } from "./Icons";
 import { Player } from "./Player";
 import { api } from "../lib/api";
-import { isGlobalPlaybackShortcut } from "../lib/playback-shortcuts";
+import {
+  isGlobalPlaybackShortcut,
+  isSpaceKey,
+} from "../lib/playback-shortcuts";
 import { selectCurrentItem, usePlayerStore } from "../store/player-store";
 
 export function Shell() {
@@ -12,6 +15,8 @@ export function Shell() {
   const clearSession = usePlayerStore((state) => state.clearSession);
   const currentItem = usePlayerStore(selectCurrentItem);
   const [signingOut, setSigningOut] = useState(false);
+  const keyboardNavigationRef = useRef(true);
+  const consumedSpaceRef = useRef(false);
   const links = [
     { to: "/", label: "Search", icon: SearchIcon, end: true },
     { to: "/liked", label: "Liked", icon: HeartIcon },
@@ -19,21 +24,51 @@ export function Shell() {
   ];
 
   useEffect(() => {
-    function toggleWithSpace(event: KeyboardEvent) {
-      if (!isGlobalPlaybackShortcut(event)) return;
+    function markPointerNavigation() {
+      keyboardNavigationRef.current = false;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Tab") keyboardNavigationRef.current = true;
+      if (!isGlobalPlaybackShortcut(event, keyboardNavigationRef.current)) return;
 
       const player = usePlayerStore.getState();
       if (!player.user || !selectCurrentItem(player)) return;
 
-      // Prevent page scrolling for both the initial event and key repeats, but
-      // only toggle once while Space is held down.
       event.preventDefault();
+      event.stopPropagation();
+      consumedSpaceRef.current = true;
       if (event.repeat) return;
       player.togglePlayback();
     }
 
-    window.addEventListener("keydown", toggleWithSpace);
-    return () => window.removeEventListener("keydown", toggleWithSpace);
+    function handleKeyUp(event: KeyboardEvent) {
+      if (!consumedSpaceRef.current || !isSpaceKey(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      consumedSpaceRef.current = false;
+    }
+
+    function resetConsumedSpace() {
+      consumedSpaceRef.current = false;
+    }
+
+    function resetWhenHidden() {
+      if (document.visibilityState === "hidden") resetConsumedSpace();
+    }
+
+    window.addEventListener("pointerdown", markPointerNavigation, true);
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("keyup", handleKeyUp, true);
+    window.addEventListener("blur", resetConsumedSpace);
+    document.addEventListener("visibilitychange", resetWhenHidden);
+    return () => {
+      window.removeEventListener("pointerdown", markPointerNavigation, true);
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keyup", handleKeyUp, true);
+      window.removeEventListener("blur", resetConsumedSpace);
+      document.removeEventListener("visibilitychange", resetWhenHidden);
+    };
   }, []);
 
   async function signOut() {
