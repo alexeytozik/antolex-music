@@ -98,6 +98,15 @@ jobs:
       - name: Build production images
         run: docker compose --profile production build api worker web
 
+      - name: Verify web assets are publicly readable
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker image inspect antolex-music-web >/dev/null
+          docker run --rm --entrypoint sh antolex-music-web -ec '
+            test -z "$(find /usr/share/nginx/html -type f ! -perm -004 -print -quit)"
+          '
+
       - name: Validate Caddy configuration
         run: >-
           docker run --rm
@@ -207,3 +216,9 @@ jobs:
           curl --fail --silent --show-error \
             --retry 12 --retry-delay 5 --retry-all-errors --max-time 15 \
             https://music.antolex.net/ >/dev/null
+          curl --fail --silent --show-error \
+            --retry 12 --retry-delay 5 --retry-all-errors --max-time 15 \
+            https://music.antolex.net/favicon.svg >/dev/null
+          curl --fail --silent --show-error \
+            --retry 12 --retry-delay 5 --retry-all-errors --max-time 15 \
+            https://music.antolex.net/logo-wordmark.svg >/dev/null

@@ -85,6 +85,9 @@ fi
 install -d -m 755 "${release_dir}"
 tar --extract --gzip --file "${archive_path}" \
   --directory "${release_dir}" --no-same-owner
+# The release contains no secrets. Keep source files readable so build tools do
+# not copy umask-077 permissions into runtime images (notably Vite public assets).
+chmod -R u=rwX,go=rX "${release_dir}"
 ln -s "${shared_env}" "${release_dir}/.env"
 
 compose=(
@@ -123,7 +126,11 @@ for _ in $(seq 1 60); do
   if curl --fail --silent --show-error --max-time 5 \
       http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1 \
     && curl --fail --silent --show-error --max-time 5 \
-      http://127.0.0.1:5173/ >/dev/null 2>&1; then
+      http://127.0.0.1:5173/ >/dev/null 2>&1 \
+    && curl --fail --silent --show-error --max-time 5 \
+      http://127.0.0.1:5173/favicon.svg >/dev/null 2>&1 \
+    && curl --fail --silent --show-error --max-time 5 \
+      http://127.0.0.1:5173/logo-wordmark.svg >/dev/null 2>&1; then
     healthy=1
     break
   fi
