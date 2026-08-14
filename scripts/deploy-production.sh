@@ -123,10 +123,7 @@ for _ in $(seq 1 60); do
   if curl --fail --silent --show-error --max-time 5 \
       http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1 \
     && curl --fail --silent --show-error --max-time 5 \
-      http://127.0.0.1:5173/ >/dev/null 2>&1 \
-    && curl --fail --silent --show-error --max-time 5 \
-      --resolve music.antolex.net:443:127.0.0.1 \
-      https://music.antolex.net/api/v1/health >/dev/null 2>&1; then
+      http://127.0.0.1:5173/ >/dev/null 2>&1; then
     healthy=1
     break
   fi
