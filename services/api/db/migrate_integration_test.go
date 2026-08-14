@@ -100,8 +100,19 @@ func TestMigrateBackfillsLegacyLikesAndIsIdempotent(t *testing.T) {
 	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM track_likes WHERE user_id=$1 AND track_id=$2`, userID, trackID).Scan(&likeCount); err != nil {
 		t.Fatalf("count migrated likes: %v", err)
 	}
-	if migrationCount != 4 || likeCount != 1 {
-		t.Fatalf("migration rows=%d migrated likes=%d; want 4 and 1", migrationCount, likeCount)
+	if migrationCount != 5 || likeCount != 1 {
+		t.Fatalf("migration rows=%d migrated likes=%d; want 5 and 1", migrationCount, likeCount)
+	}
+
+	var readyShuffleIndex string
+	if err := db.QueryRow(ctx, `
+		SELECT indexname
+		FROM pg_indexes
+		WHERE schemaname = current_schema()
+		  AND tablename = 'library_tracks'
+		  AND indexname = 'idx_library_tracks_ready_id'
+	`).Scan(&readyShuffleIndex); err != nil {
+		t.Fatalf("load ready-track shuffle index: %v", err)
 	}
 
 	var uploadSizeConstraint string
