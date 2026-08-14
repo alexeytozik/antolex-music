@@ -14,7 +14,6 @@ root="/home/atozik/antolex-music"
 incoming_dir="${root}/incoming"
 releases_dir="${root}/releases"
 shared_env="${root}/shared/.env"
-backup_dir="${root}/shared/backups/postgres"
 release_dir="${releases_dir}/${release_id}"
 archive_path="${incoming_dir}/${archive_name}"
 checksum_path="${archive_path}.sha256"
@@ -102,19 +101,13 @@ existing_services="$(sudo -n docker ps -a \
   --filter 'label=com.docker.compose.project=antolex-music' \
   --format '{{.Label "com.docker.compose.service"}}')"
 if grep -Fxq postgres <<<"${existing_services}"; then
-  running_services="$(sudo -n docker ps \
-    --filter 'label=com.docker.compose.project=antolex-music' \
-    --format '{{.Label "com.docker.compose.service"}}')"
-  if ! grep -Fxq postgres <<<"${running_services}"; then
-    printf 'Existing PostgreSQL container is not running; refusing an unbacked deployment.\n' >&2
-    exit 1
-  fi
-  (
-    cd "${release_dir}"
-    sudo -n env -u DATABASE_URL \
-      ANTOLEX_BACKUP_DIR="${backup_dir}" \
-      ./scripts/backup-postgres.sh
-  )
+	running_services="$(sudo -n docker ps \
+		--filter 'label=com.docker.compose.project=antolex-music' \
+		--format '{{.Label "com.docker.compose.service"}}')"
+	if ! grep -Fxq postgres <<<"${running_services}"; then
+		printf 'Existing PostgreSQL container is not running; refusing deployment.\n' >&2
+		exit 1
+	fi
 fi
 
 deploy_started=1

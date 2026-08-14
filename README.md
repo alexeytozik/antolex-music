@@ -6,7 +6,7 @@ Mobile-first private music library for Safari on iOS 16.4+ and Chrome on Android
 
 1. The browser calculates a full-file SHA-256 in a Web Worker. The API rejects an exact duplicate before any bytes are uploaded.
 2. The browser uploads up to 50 files, one at a time, directly to R2 in resumable 8 MiB multipart chunks. R2 credentials never reach the browser.
-3. A PostgreSQL-backed media job verifies the uploaded hash, reads tags and embedded artwork, and produces an M4A AAC-LC 256 kbit/s playback copy with `faststart`.
+3. A PostgreSQL-backed media job verifies the uploaded hash, reads tags and embedded artwork, and produces the single retained audio object: an M4A AAC-LC 256 kbit/s playback file with `faststart`. The temporary uploaded source is deleted after publication.
 4. Only `ready` tracks appear in the newest-first catalog and search. Search ranks title, artist, and album matches.
 5. Catalog and liked queues fetch 20 tracks at a time and keep extending during playback, while consumed history stays bounded for large libraries.
 6. Shuffle walks the complete ready library through a signed server cursor instead of choosing only from tracks already rendered in the browser.

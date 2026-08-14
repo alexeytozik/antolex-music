@@ -190,7 +190,7 @@ jobs:
           remote_root="/home/atozik/antolex-music"
 
           ssh "${ssh_options[@]}" "${remote}" \
-            'install -d -m 755 /home/atozik/antolex-music/incoming /home/atozik/antolex-music/releases; install -d -m 700 /home/atozik/antolex-music/shared /home/atozik/antolex-music/shared/backups /home/atozik/antolex-music/shared/backups/postgres'
+            'install -d -m 755 /home/atozik/antolex-music/incoming /home/atozik/antolex-music/releases; install -d -m 700 /home/atozik/antolex-music/shared'
           scp -q "${ssh_options[@]}" \
             "${RELEASE_ARCHIVE}" "${RELEASE_ARCHIVE}.sha256" \
             "${remote}:${remote_root}/incoming/"

@@ -213,6 +213,11 @@ func TestWorkerPublishesThenPermanentlyDeletesTrack(t *testing.T) {
 
 	storage := newFakeR2(t)
 	storage.put(fixture.incomingKey, "audio/wav", wav)
+	staleOriginalKey := "originals/" + fixture.trackID + "/stale.wav"
+	storage.put(staleOriginalKey, "audio/wav", wav)
+	if _, err := db.Exec(ctx, `UPDATE library_tracks SET original_object_key=$2 WHERE id=$1`, fixture.trackID, staleOriginalKey); err != nil {
+		t.Fatalf("set stale original key: %v", err)
+	}
 	cache := miniredis.RunT(t)
 	redisClient := redis.NewClient(&redis.Options{Addr: cache.Addr()})
 	defer redisClient.Close()
@@ -241,11 +246,11 @@ func TestWorkerPublishesThenPermanentlyDeletesTrack(t *testing.T) {
 	if trackStatus != "ready" || uploadStatus != "ready" || jobStatus != "succeeded" {
 		t.Fatalf("published states track=%q upload=%q job=%q", trackStatus, uploadStatus, jobStatus)
 	}
-	if originalKey == "" || playbackKey == "" || objectKey != playbackKey || coverKey != "" || duration <= 0 {
+	if originalKey != "" || playbackKey == "" || objectKey != playbackKey || coverKey != "" || duration <= 0 {
 		t.Fatalf("published keys/duration original=%q playback=%q object=%q cover=%q duration=%d", originalKey, playbackKey, objectKey, coverKey, duration)
 	}
-	if got, ok := storage.get(originalKey); !ok || !bytes.Equal(got.body, wav) {
-		t.Fatalf("original object was not preserved")
+	if _, ok := storage.get(staleOriginalKey); ok {
+		t.Fatalf("obsolete original object was retained")
 	}
 	if got, ok := storage.get(playbackKey); !ok || len(got.body) == 0 || got.contentType != "audio/mp4" {
 		t.Fatalf("playback object missing or invalid: exists=%v bytes=%d type=%q", ok, len(got.body), got.contentType)
@@ -284,14 +289,11 @@ func TestWorkerPublishesThenPermanentlyDeletesTrack(t *testing.T) {
 	if tracks != 0 || likes != 0 {
 		t.Fatalf("permanent deletion left tracks=%d likes=%d", tracks, likes)
 	}
-	if _, ok := storage.get(originalKey); ok {
-		t.Fatalf("original object still exists after deletion")
-	}
 	if _, ok := storage.get(playbackKey); ok {
 		t.Fatalf("playback object still exists after deletion")
 	}
-	if storage.deleted(originalKey) != 1 || storage.deleted(playbackKey) != 1 {
-		t.Fatalf("derived objects were not deleted exactly once: original=%d playback=%d", storage.deleted(originalKey), storage.deleted(playbackKey))
+	if storage.deleted(staleOriginalKey) != 1 || storage.deleted(playbackKey) != 1 {
+		t.Fatalf("objects were not deleted exactly once: stale_original=%d playback=%d", storage.deleted(staleOriginalKey), storage.deleted(playbackKey))
 	}
 }
 

@@ -9,7 +9,6 @@ The server layout is:
   current -> releases/<commit>-<run>-<attempt>
   releases/
   shared/.env
-  backups/postgres/
   incoming/
 ```
 
@@ -21,10 +20,7 @@ The server layout is:
 
 ```bash
 install -d -m 755 /home/atozik/antolex-music/{releases,incoming}
-install -d -m 700 \
-  /home/atozik/antolex-music/shared \
-  /home/atozik/antolex-music/shared/backups \
-  /home/atozik/antolex-music/shared/backups/postgres
+install -d -m 700 /home/atozik/antolex-music/shared
 if [[ ! -e /home/atozik/antolex-music/shared/.env ]]; then
   install -m 600 /dev/null /home/atozik/antolex-music/shared/.env
 fi
@@ -106,7 +102,7 @@ post-copy SHA-256 verification exactly as documented in
 
 A push to `main`, or a manual `workflow_dispatch` explicitly run from `main`, deploys only after all three checks pass. Production deployments are serialized and never cancel an active deployment.
 
-The deploy job uses only the system `ssh` and `scp` clients. It verifies the pinned host key, uploads a SHA-256-checked `git archive`, extracts a unique release directory, links the shared `.env`, and validates Compose. If an `antolex-music` PostgreSQL container already exists, deployment stops unless it is running and a validated custom-format backup succeeds. The backup is written to the shared `backups/postgres` directory before new containers are built or started.
+The deploy job uses only the system `ssh` and `scp` clients. It verifies the pinned host key, uploads a SHA-256-checked `git archive`, extracts a unique release directory, links the shared `.env`, and validates Compose. If an `antolex-music` PostgreSQL container already exists, deployment stops unless it is running.
 
 The workflow then runs `sudo docker compose --profile production up -d --build --remove-orphans` and waits up to five minutes for all of these checks:
 
@@ -114,19 +110,9 @@ The workflow then runs `sudo docker compose --profile production up -d --build -
 - `http://127.0.0.1:5173/`;
 - `https://music.antolex.net/api/v1/health` through local Caddy with certificate verification.
 
-Only then is `current` atomically switched to the new release. On failure it keeps the old symlink and, when an older release is known, attempts to restore that release's Compose stack. Failed release directories remain available for diagnosis; old releases and database backups are never deleted automatically.
+Only then is `current` atomically switched to the new release. On failure it keeps the old symlink and, when an older release is known, attempts to restore that release's Compose stack. Failed release directories remain available for diagnosis.
 
 After a successful deployment, verify the Actions run and then check a sign-in flow on one iPhone and one Android phone: request/resend code, search, like, upload a small file, wait for processing, play with the screen locked, and use headset play/pause/next controls.
-
-## Weekly database backup
-
-The backup script writes a new custom-format dump, validates it with `pg_restore --list`, and writes a SHA-256 sidecar. It never removes an older dump. Example root cron entry for Sunday 03:15 UTC:
-
-```cron
-15 3 * * 0 cd /home/atozik/antolex-music/current && sudo env -u DATABASE_URL ANTOLEX_BACKUP_DIR=/home/atozik/antolex-music/shared/backups/postgres ./scripts/backup-postgres.sh >>/var/log/antolex-backup.log 2>&1
-```
-
-Monitor the exit status and copy backups off the server. Prune only after confirming both the restore test and the off-server copy; retention deletion is deliberately not automated here.
 
 ## Rollback
 
@@ -144,6 +130,6 @@ sudo docker compose \
 curl --fail --silent --show-error https://music.antolex.net/api/v1/health
 ```
 
-Use an exact, reviewed release path; do not delete or rewrite release directories during rollback. Restore PostgreSQL from the pre-deploy dump only if a schema or data rollback is actually required. An application-only rollback is safer.
+Use an exact, reviewed release path; do not delete or rewrite release directories during rollback. Database rollback is not automatic.
 
 Keep the old bucket read-only for at least seven days after a successful cutover. Its deletion requires a separate explicit confirmation.

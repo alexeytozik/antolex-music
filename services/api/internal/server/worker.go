@@ -219,12 +219,16 @@ func (w *mediaWorker) run(ctx context.Context, job mediaJob) (bool, error) {
 }
 
 func (w *mediaWorker) processUpload(ctx context.Context, job mediaJob) error {
-	var incoming, fileName, expectedHash, contentType, explicitTitle, explicitArtist, explicitAlbum string
+	var incoming, fileName, expectedHash, explicitTitle, explicitArtist, explicitAlbum, previousOriginal string
 	var expectedSize int64
 	err := w.db.QueryRow(ctx, `
-		SELECT r2_object_key,file_name,sha256,content_type,title,artist,album,size_bytes FROM upload_sessions
-		WHERE id=$1 AND track_id=$2 AND status='processing'
-	`, job.UploadID, job.TrackID).Scan(&incoming, &fileName, &expectedHash, &contentType, &explicitTitle, &explicitArtist, &explicitAlbum, &expectedSize)
+		SELECT upload.r2_object_key,upload.file_name,upload.sha256,
+		       upload.title,upload.artist,upload.album,upload.size_bytes,
+		       COALESCE(track.original_object_key,'')
+		FROM upload_sessions upload
+		JOIN library_tracks track ON track.id=upload.track_id
+		WHERE upload.id=$1 AND upload.track_id=$2 AND upload.status='processing'
+	`, job.UploadID, job.TrackID).Scan(&incoming, &fileName, &expectedHash, &explicitTitle, &explicitArtist, &explicitAlbum, &expectedSize, &previousOriginal)
 	if err != nil {
 		return fmt.Errorf("load upload: %w", err)
 	}
@@ -295,18 +299,13 @@ func (w *mediaWorker) processUpload(ctx context.Context, job mediaJob) error {
 		return fmt.Errorf("transcoder produced an empty file")
 	}
 
-	originalSlug := slugify(strings.TrimSuffix(path.Base(fileName), ext))
-	if originalSlug == "" {
-		originalSlug = "track"
-	}
-	originalKey := fmt.Sprintf("originals/%s/%s%s", job.TrackID, originalSlug, ext)
 	playbackKey := fmt.Sprintf("playback/%s.m4a", job.TrackID)
 	plannedCoverKey := fmt.Sprintf("covers/%s.jpg", job.TrackID)
 	persistResult, err := w.db.Exec(ctx, `
 		UPDATE library_tracks
-		SET original_object_key=$2,playback_object_key=$3,cover_object_key=$4,updated_at=NOW()
+		SET playback_object_key=$2,cover_object_key=$3,updated_at=NOW()
 		WHERE id=$1 AND status='processing'
-	`, job.TrackID, originalKey, playbackKey, plannedCoverKey)
+	`, job.TrackID, playbackKey, plannedCoverKey)
 	if err != nil {
 		return fmt.Errorf("persist derived object keys: %w", err)
 	}
@@ -314,9 +313,6 @@ func (w *mediaWorker) processUpload(ctx context.Context, job mediaJob) error {
 		return fmt.Errorf("track is no longer processing")
 	}
 	coverKey := ""
-	if err := uploadLocalFile(ctx, w.storage, originalKey, contentType, sourcePath); err != nil {
-		return fmt.Errorf("store original: %w", err)
-	}
 	if err := uploadLocalFile(ctx, w.storage, playbackKey, "audio/mp4", playbackPath); err != nil {
 		return fmt.Errorf("store playback: %w", err)
 	}
@@ -346,10 +342,10 @@ func (w *mediaWorker) processUpload(ctx context.Context, job mediaJob) error {
 	var resultingStatus string
 	err = tx.QueryRow(ctx, `
 		UPDATE library_tracks SET title=$2,artist=$3,album=$4,duration_seconds=$5,
-			original_object_key=$6,playback_object_key=$7,cover_object_key=NULLIF($8,''),object_key=$7,
+			original_object_key=NULL,playback_object_key=$6,cover_object_key=NULLIF($7,''),object_key=$6,
 			cover_url='',status=CASE WHEN status='processing' THEN 'ready' ELSE status END,error_message=NULL,updated_at=NOW()
 		WHERE id=$1 RETURNING status
-	`, job.TrackID, metadata.Title, metadata.Artist, metadata.Album, metadata.DurationSeconds, originalKey, playbackKey, coverKey).Scan(&resultingStatus)
+	`, job.TrackID, metadata.Title, metadata.Artist, metadata.Album, metadata.DurationSeconds, playbackKey, coverKey).Scan(&resultingStatus)
 	if err != nil {
 		return err
 	}
@@ -366,7 +362,25 @@ func (w *mediaWorker) processUpload(ctx context.Context, job mediaJob) error {
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	_ = w.storage.DeleteObject(ctx, incoming)
+	seenObsolete := make(map[string]struct{}, 2)
+	for _, obsoleteKey := range []string{incoming, previousOriginal} {
+		if obsoleteKey == "" || obsoleteKey == playbackKey || obsoleteKey == coverKey {
+			continue
+		}
+		if _, seen := seenObsolete[obsoleteKey]; seen {
+			continue
+		}
+		seenObsolete[obsoleteKey] = struct{}{}
+		if err := w.storage.DeleteObject(ctx, obsoleteKey); err != nil && !isObjectNotFoundError(err) {
+			log.Printf(
+				`{"level":"warn","event":"obsolete_upload_object_cleanup_failed","track_id":%q,"upload_id":%q,"object_key":%q,"error":%q}`,
+				job.TrackID,
+				job.UploadID,
+				obsoleteKey,
+				err.Error(),
+			)
+		}
+	}
 	w.invalidateSearchCache(ctx)
 	return nil
 }

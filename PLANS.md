@@ -18,7 +18,17 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 10. Keep published tracks immutable in the user application and remove the signed-in Profile destination. Show only direct `Sign in` or `Signed in` / `Sign out` controls in the header; retain `/profile` solely for the guest email-code form. Remove track edit/delete, failed-operation controls, and user-management routes; bootstrap or reactivate permitted addresses through `ACCESS_EMAILS`, with revocation handled operationally in PostgreSQL.
 11. Preserve embedded artwork when it exists and render a deterministic 512 px ANTOLEX cover from track metadata when an audio file has no artwork, so missing source images no longer collapse the catalog into one repeated placeholder.
 12. Make playback resilient without adding new screens: automatically recover a stream after transient network failures, extend a catalog-backed queue before it reaches the last loaded page, and make shuffle cover the complete matching library rather than only tracks already rendered in the feed. Preserve the current track, position, play intent, likes, search ordering, Media Session controls, and persisted player state.
-13. Add GitHub Actions on the public repository for frontend tests/build, backend test/vet, and production Compose validation. Serialize deployments from `main`, transfer a checksummed release over strict-host-key SSH without third-party deployment actions, back up a running PostgreSQL stack before changes, activate only after health checks, and keep versioned releases with a shared production environment.
+13. Add GitHub Actions on the public repository for frontend tests/build, backend test/vet, and production Compose validation. Serialize deployments from `main`, transfer a checksummed release over strict-host-key SSH without third-party deployment actions, activate only after health checks, and keep versioned releases with a shared production environment.
+14. Consolidate the live library around production as the only source of truth. Merge the 13 verified local-only tracks without re-uploading their existing R2 media, retain one canonical M4A playback object plus an optional cover per track, migrate the four legacy `library/` objects, remove verified originals and smoke-test data, and retire the local Docker database immediately after production validation.
+
+## Production consolidation (in progress)
+
+1. Capture an exact local/production database diff and R2 inventory. The owner explicitly waived new backups for this pet-project consolidation.
+2. Dry-run collision and object checks, then transactionally insert only the 13 local-only `library_tracks` rows into production and invalidate the search cache.
+3. Deploy worker/schema changes that stop retaining `originals/` objects after successful M4A publication.
+4. Copy and verify the four legacy playable objects into canonical `playback/<track-id>.m4a` keys, update production rows atomically, and verify all 29 tracks, covers, and streams.
+5. Delete only the now-unreferenced 25 `originals/` objects, four replaced `library/` audio objects, and the single smoke-test object. Confirm there are no missing referenced objects or incomplete multipart uploads.
+6. Stop the local ANTOLEX stack and immediately remove its PostgreSQL/Redis volumes as explicitly requested. Remove only confirmed ANTOLEX/Tozikron development images and volumes; preserve unrelated Docker resources.
 
 ## Current local status
 
@@ -33,10 +43,11 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 - Embedded artwork is preserved whenever the source contains it; files without an image stream receive distinct metadata-derived ANTOLEX covers without pretending they are official album artwork.
 - Ordered and liked playback queues continue through cursor pages while retaining only a bounded consumed history. Shuffle uses a signed, indexed server cursor across the complete ready library, and transient stream/network failures recover automatically without a manual Retry.
 - The CI/deploy workflow and release-layout runbook use four repository secrets and the server-side `/home/atozik/antolex-music/shared/.env`. Every successful `main` run publishes an immutable release and keeps application secrets outside GitHub.
+- Production is live at `music.antolex.net`. Before consolidation, the shared R2 bucket contains 29 tracks' media while production PostgreSQL knows 16 tracks and the local PostgreSQL knows all 29; automatic bucket scanning remains intentionally disabled.
 
 ## Safety gates
 
-- Any future database or R2 cleanup requires a fresh backup, a dry-run report, and explicit confirmation of the exact targets.
+- Any future database or R2 cleanup requires a dry-run report and explicit confirmation of the exact targets.
 - Do not create/copy/delete remote R2 buckets, rename the GitHub repository, or change production DNS/deployment without action-time confirmation.
 - Keep the old R2 bucket for seven days after a verified cutover; deletion requires separate confirmation.
 - Never commit `.env`, SMTP credentials, R2 credentials, database dumps, or generated presigned URLs.
