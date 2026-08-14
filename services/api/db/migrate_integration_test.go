@@ -31,13 +31,24 @@ func TestMigrateBackfillsLegacyLikesAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read initial migration: %v", err)
 	}
-	if _, err := db.Exec(ctx, string(initial)); err != nil {
-		t.Fatalf("apply initial migration: %v", err)
-	}
-	checksum := sha256.Sum256(initial)
-	if _, err := db.Exec(ctx, `INSERT INTO schema_migrations(version,checksum) VALUES($1,$2)`, "0001_initial.sql", hex.EncodeToString(checksum[:])); err != nil {
-		t.Fatalf("record initial migration: %v", err)
-	}
+	func() {
+		conn, err := db.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire staged migration connection: %v", err)
+		}
+		defer conn.Release()
+		if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(1948596401)`); err != nil {
+			t.Fatalf("lock staged migration: %v", err)
+		}
+		defer conn.Exec(context.Background(), `SELECT pg_advisory_unlock(1948596401)`) //nolint:errcheck
+		if _, err := conn.Exec(ctx, string(initial)); err != nil {
+			t.Fatalf("apply initial migration: %v", err)
+		}
+		checksum := sha256.Sum256(initial)
+		if _, err := conn.Exec(ctx, `INSERT INTO schema_migrations(version,checksum) VALUES($1,$2)`, "0001_initial.sql", hex.EncodeToString(checksum[:])); err != nil {
+			t.Fatalf("record initial migration: %v", err)
+		}
+	}()
 
 	userID := uuid.NewString()
 	trackID := uuid.NewString()
@@ -100,8 +111,8 @@ func TestMigrateBackfillsLegacyLikesAndIsIdempotent(t *testing.T) {
 	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM track_likes WHERE user_id=$1 AND track_id=$2`, userID, trackID).Scan(&likeCount); err != nil {
 		t.Fatalf("count migrated likes: %v", err)
 	}
-	if migrationCount != 5 || likeCount != 1 {
-		t.Fatalf("migration rows=%d migrated likes=%d; want 5 and 1", migrationCount, likeCount)
+	if migrationCount != 6 || likeCount != 1 {
+		t.Fatalf("migration rows=%d migrated likes=%d; want 6 and 1", migrationCount, likeCount)
 	}
 
 	var readyShuffleIndex string
@@ -113,6 +124,15 @@ func TestMigrateBackfillsLegacyLikesAndIsIdempotent(t *testing.T) {
 		  AND indexname = 'idx_library_tracks_ready_id'
 	`).Scan(&readyShuffleIndex); err != nil {
 		t.Fatalf("load ready-track shuffle index: %v", err)
+	}
+	for _, indexName := range []string{"idx_upload_sessions_terminal_cleanup", "idx_upload_sessions_operational_queue", "idx_media_jobs_succeeded_cleanup"} {
+		var stored string
+		if err := db.QueryRow(ctx, `
+			SELECT indexname FROM pg_indexes
+			WHERE schemaname=current_schema() AND indexname=$1
+		`, indexName).Scan(&stored); err != nil {
+			t.Fatalf("load cleanup index %s: %v", indexName, err)
+		}
 	}
 
 	var uploadSizeConstraint string

@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type InputHTMLAttributes } from "react";
 
 import {
-  CheckIcon,
   CloseIcon,
   FolderIcon,
   PauseIcon,
@@ -15,8 +14,15 @@ import { hashFile } from "../lib/hash-file";
 import {
   listPersistedUploads,
   persistUpload,
-  type PersistedUpload,
+  removePersistedUploads,
 } from "../lib/upload-db";
+import {
+  isHiddenTerminalStatus,
+  restoreUploadQueue,
+  serverUploadStatus,
+  toPersistedUpload,
+  type UploadQueueItem,
+} from "../lib/upload-queue";
 import {
   formatFileSize,
   MAX_UPLOAD_FILES,
@@ -25,86 +31,8 @@ import {
 } from "../lib/upload-validation";
 import type { Track, UploadedPart, UploadSession } from "../types";
 
-type LocalStatus =
-  | "queued"
-  | "needs_file"
-  | "hashing"
-  | "duplicate"
-  | "uploading"
-  | "paused"
-  | "processing"
-  | "ready"
-  | "error"
-  | "cancelled";
-
-type UploadItem = {
-  localId: string;
-  sessionId?: string;
-  fileName: string;
-  sizeBytes: number;
-  contentType: string;
-  lastModified: number;
-  sha256?: string;
-  status: LocalStatus;
-  progress: number;
-  uploadedParts: UploadedPart[];
-  file?: File;
-  track?: Track;
-  duplicateTrack?: Track;
-  error?: string;
-  createdAt: string;
-};
-
-function statusWithoutFile(status: string): LocalStatus {
-  if (status === "processing" || status === "ready" || status === "error" || status === "cancelled") {
-    return status;
-  }
-  return "needs_file";
-}
-
-function toPersisted(item: UploadItem): PersistedUpload {
-  return {
-    local_id: item.localId,
-    session_id: item.sessionId,
-    file_name: item.fileName,
-    size_bytes: item.sizeBytes,
-    content_type: item.contentType,
-    last_modified: item.lastModified,
-    sha256: item.sha256,
-    status: item.status,
-    uploaded_bytes: Math.round(item.progress * item.sizeBytes),
-    uploaded_parts: item.uploadedParts,
-    error: item.error,
-    created_at: item.createdAt,
-  };
-}
-
-function fromPersisted(item: PersistedUpload): UploadItem {
-  return {
-    localId: item.local_id,
-    sessionId: item.session_id,
-    fileName: item.file_name,
-    sizeBytes: item.size_bytes,
-    contentType: item.content_type,
-    lastModified: item.last_modified,
-    sha256: item.sha256,
-    status: statusWithoutFile(item.status),
-    progress: item.size_bytes ? item.uploaded_bytes / item.size_bytes : 0,
-    uploadedParts: item.uploaded_parts ?? [],
-    error: item.error,
-    createdAt: item.created_at,
-  };
-}
-
-function serverStatus(session: UploadSession): LocalStatus {
-  if (session.status === "pending" || session.status === "uploading" || session.status === "paused") {
-    return "needs_file";
-  }
-  return session.status === "deleting" ? "cancelled" : session.status;
-}
-
 export function AddView() {
-  const [items, setItems] = useState<UploadItem[]>([]);
+  const [items, setItems] = useState<UploadQueueItem[]>([]);
   const [pageError, setPageError] = useState<string | null>(null);
   const [wakeQueue, setWakeQueue] = useState(0);
   const itemsRef = useRef(items);
@@ -112,20 +40,39 @@ export function AddView() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
 
-  function replaceItems(next: UploadItem[]) {
+  function replaceItems(next: UploadQueueItem[]) {
     itemsRef.current = next;
     setItems(next);
   }
 
-  function updateItem(localId: string, patch: Partial<UploadItem>) {
-    let updated: UploadItem | undefined;
+  function updateItem(localId: string, patch: Partial<UploadQueueItem>) {
+    let updated: UploadQueueItem | undefined;
     const next = itemsRef.current.map((item) => {
       if (item.localId !== localId) return item;
       updated = { ...item, ...patch };
       return updated;
     });
     replaceItems(next);
-    if (updated) void persistUpload(toPersisted(updated));
+    if (updated) void persistUpload(toPersistedUpload(updated));
+  }
+
+  function removeItem(localId: string) {
+    replaceItems(itemsRef.current.filter((item) => item.localId !== localId));
+    void removePersistedUploads([localId]);
+  }
+
+  function applySessionUpdate(item: UploadQueueItem, session: UploadSession) {
+    const status = serverUploadStatus(session);
+    if (isHiddenTerminalStatus(status)) {
+      removeItem(item.localId);
+      return;
+    }
+    updateItem(item.localId, {
+      status,
+      track: session.track,
+      error: session.error,
+      progress: status === "processing" ? 1 : item.progress,
+    });
   }
 
   useEffect(() => {
@@ -133,30 +80,9 @@ export function AddView() {
     void Promise.all([listPersistedUploads(), api.getUploads()])
       .then(([persisted, remote]) => {
         if (cancelled) return;
-        const restored = persisted.map(fromPersisted);
-        for (const session of remote) {
-          const index = restored.findIndex((item) => item.sessionId === session.id);
-          const existing = index >= 0 ? restored[index] : undefined;
-          const merged: UploadItem = {
-            localId: existing?.localId ?? crypto.randomUUID(),
-            sessionId: session.id,
-            fileName: session.file_name,
-            sizeBytes: session.size_bytes,
-            contentType: session.content_type,
-            lastModified: existing?.lastModified ?? 0,
-            sha256: session.sha256,
-            status: serverStatus(session),
-            progress: session.status === "ready" || session.status === "processing" ? 1 : existing?.progress ?? 0,
-            uploadedParts: session.uploaded_parts ?? existing?.uploadedParts ?? [],
-            track: session.track,
-            error: session.error,
-            createdAt: session.created_at ?? existing?.createdAt ?? new Date().toISOString(),
-          };
-          if (index >= 0) restored[index] = merged;
-          else restored.push(merged);
-        }
-        restored.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-        replaceItems(restored);
+        const restored = restoreUploadQueue(persisted, remote);
+        replaceItems(restored.items);
+        void removePersistedUploads(restored.discardedLocalIds);
       })
       .catch((reason) => {
         if (!cancelled) {
@@ -175,19 +101,14 @@ export function AddView() {
     const timer = window.setInterval(() => {
       for (const item of processing) {
         void api.getUpload(item.sessionId!).then((session) => {
-          updateItem(item.localId, {
-            status: serverStatus(session),
-            track: session.track,
-            error: session.error,
-            progress: 1,
-          });
+          applySessionUpdate(item, session);
         }).catch(() => undefined);
       }
     }, 4000);
     return () => window.clearInterval(timer);
   }, [items]);
 
-  async function processOne(item: UploadItem) {
+  async function processOne(item: UploadQueueItem) {
     if (!item.file || activeRef.current) return;
     const controller = new AbortController();
     activeRef.current = { id: item.localId, controller };
@@ -275,13 +196,18 @@ export function AddView() {
       }
 
       const completed = await api.completeUpload(session.id, Array.from(parts.values()));
-      updateItem(item.localId, {
-        status: serverStatus(completed),
-        progress: 1,
-        file: undefined,
-        track: completed.track,
-        error: completed.error,
-      });
+      const completedStatus = serverUploadStatus(completed);
+      if (isHiddenTerminalStatus(completedStatus)) {
+        removeItem(item.localId);
+      } else {
+        updateItem(item.localId, {
+          status: completedStatus,
+          progress: 1,
+          file: undefined,
+          track: completed.track,
+          error: completed.error,
+        });
+      }
     } catch (reason) {
       if (!(reason instanceof DOMException && reason.name === "AbortError")) {
         updateItem(item.localId, {
@@ -335,11 +261,11 @@ export function AddView() {
           : -1;
       if (resumableIndex >= 0 && !validationError) {
         next[resumableIndex] = { ...next[resumableIndex], file, status: "queued", error: undefined };
-        void persistUpload(toPersisted(next[resumableIndex]));
+        void persistUpload(toPersistedUpload(next[resumableIndex]));
         continue;
       }
 
-      const item: UploadItem = {
+      const item: UploadQueueItem = {
         localId: crypto.randomUUID(),
         fileName: file.name,
         sizeBytes: file.size,
@@ -353,23 +279,30 @@ export function AddView() {
         createdAt: new Date().toISOString(),
       };
       next.unshift(item);
-      void persistUpload(toPersisted(item));
+      void persistUpload(toPersistedUpload(item));
     }
     replaceItems(next);
   }
 
-  function pause(item: UploadItem) {
+  function pause(item: UploadQueueItem) {
     if (activeRef.current?.id === item.localId) activeRef.current.controller.abort();
     updateItem(item.localId, { status: "paused" });
   }
 
-  async function cancel(item: UploadItem) {
+  async function cancel(item: UploadQueueItem) {
     if (activeRef.current?.id === item.localId) activeRef.current.controller.abort();
-    updateItem(item.localId, { status: "cancelled", file: undefined });
-    if (item.sessionId) {
-      try {
-        await api.cancelUpload(item.sessionId);
-      } catch (reason) {
+    if (!item.sessionId) {
+      removeItem(item.localId);
+      return;
+    }
+    updateItem(item.localId, { status: "cancelling", file: undefined, error: undefined });
+    try {
+      await api.cancelUpload(item.sessionId);
+      removeItem(item.localId);
+    } catch (reason) {
+      if (reason instanceof APIError && reason.code === "upload_not_found") {
+        removeItem(item.localId);
+      } else {
         updateItem(item.localId, {
           status: "error",
           error: reason instanceof Error ? reason.message : "Could not cancel upload",
@@ -378,11 +311,11 @@ export function AddView() {
     }
   }
 
-  async function retry(item: UploadItem) {
+  async function retry(item: UploadQueueItem) {
     if (item.sessionId && item.status === "error" && !item.file) {
       try {
         const session = await api.retryUpload(item.sessionId);
-        updateItem(item.localId, { status: serverStatus(session), error: undefined });
+        applySessionUpdate(item, session);
       } catch (reason) {
         updateItem(item.localId, { error: reason instanceof Error ? reason.message : "Retry failed" });
       }
@@ -395,7 +328,6 @@ export function AddView() {
     <section className="view-stack" aria-labelledby="add-heading">
       <div className="view-heading">
         <div><p className="eyebrow">Your library</p><h1 id="add-heading">Add music</h1></div>
-        <span className="count-pill">{items.length}</span>
       </div>
 
       <div className="upload-picker">
@@ -422,7 +354,7 @@ export function AddView() {
         {items.map((item) => (
           <article key={item.localId} className="upload-row">
             <div className={`upload-state state-${item.status}`}>
-              {item.status === "ready" ? <CheckIcon className="h-5 w-5" /> : item.status === "hashing" || item.status === "uploading" || item.status === "processing" ? <SpinnerIcon className="h-5 w-5 animate-spin" /> : <UploadIcon className="h-5 w-5" />}
+              {item.status === "hashing" || item.status === "uploading" || item.status === "processing" || item.status === "cancelling" ? <SpinnerIcon className="h-5 w-5 animate-spin" /> : <UploadIcon className="h-5 w-5" />}
             </div>
             <div className="upload-copy">
               <strong>{item.fileName}</strong>
@@ -435,7 +367,8 @@ export function AddView() {
               {(item.status === "hashing" || item.status === "uploading") && <button className="icon-button" type="button" onClick={() => pause(item)} aria-label="Pause"><PauseIcon className="h-5 w-5" /></button>}
               {(item.status === "paused" || item.status === "error") && <button className="icon-button" type="button" onClick={() => void retry(item)} aria-label="Retry"><RetryIcon className="h-5 w-5" /></button>}
               {item.status === "needs_file" && <button className="secondary-button compact" type="button" onClick={() => fileInputRef.current?.click()}>Reselect</button>}
-              {!(["ready", "cancelled", "duplicate"].includes(item.status)) && <button className="icon-button danger" type="button" onClick={() => void cancel(item)} aria-label="Cancel"><CloseIcon className="h-5 w-5" /></button>}
+              {item.status === "duplicate" && <button className="icon-button" type="button" onClick={() => removeItem(item.localId)} aria-label="Dismiss duplicate"><CloseIcon className="h-5 w-5" /></button>}
+              {["queued", "needs_file", "hashing", "uploading", "paused", "error"].includes(item.status) && <button className="icon-button danger" type="button" onClick={() => void cancel(item)} aria-label="Cancel and remove"><CloseIcon className="h-5 w-5" /></button>}
             </div>
           </article>
         ))}

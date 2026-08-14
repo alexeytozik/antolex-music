@@ -230,7 +230,9 @@ func (s *Server) listUploads(c *fiber.Ctx) error {
 	cursor := decodeUploadCursor(c.Query("cursor"))
 	rows, err := s.db.Query(ctx, `
 		SELECT id::text FROM upload_sessions
-		WHERE user_id = $1 AND ($2::timestamptz IS NULL OR created_at < $2 OR (created_at = $2 AND id::text < $3))
+		WHERE user_id = $1
+		  AND status IN ('uploading','paused','processing','error')
+		  AND ($2::timestamptz IS NULL OR created_at < $2 OR (created_at = $2 AND id::text < $3))
 		ORDER BY created_at DESC, id DESC LIMIT $4
 	`, userID, cursorTime(cursor), cursor.ID, uploadPageSize+1)
 	if err != nil {

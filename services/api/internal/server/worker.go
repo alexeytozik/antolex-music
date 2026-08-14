@@ -61,6 +61,9 @@ func RunWorker(ctx context.Context, cfg config.Config) error {
 			if err := worker.cleanupExpiredUploads(ctx); err != nil {
 				log.Printf(`{"level":"error","event":"expired_upload_cleanup_failed","error":%q}`, err.Error())
 			}
+			if err := worker.cleanupTerminalUploadHistory(ctx, time.Now().Add(-terminalUploadRetention)); err != nil {
+				log.Printf(`{"level":"error","event":"terminal_upload_cleanup_failed","error":%q}`, err.Error())
+			}
 			lastUploadCleanup = time.Now()
 		}
 		job, err := worker.claim(ctx)
@@ -94,6 +97,43 @@ func RunWorker(ctx context.Context, cfg config.Config) error {
 type expiredUpload struct {
 	ID, TrackID, ObjectKey, MultipartID string
 	SizeBytes                           int64
+}
+
+const (
+	terminalUploadRetention  = time.Hour
+	terminalCleanupBatchSize = 500
+)
+
+func (w *mediaWorker) cleanupTerminalUploadHistory(ctx context.Context, cutoff time.Time) error {
+	tx, err := w.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if _, err := tx.Exec(ctx, `
+		WITH doomed AS (
+			SELECT id FROM media_jobs
+			WHERE status='succeeded' AND COALESCE(finished_at,updated_at) < $1
+			ORDER BY COALESCE(finished_at,updated_at),id
+			LIMIT $2
+		)
+		DELETE FROM media_jobs job USING doomed WHERE job.id=doomed.id
+	`, cutoff, terminalCleanupBatchSize); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		WITH doomed AS (
+			SELECT id FROM upload_sessions
+			WHERE status IN ('ready','cancelled') AND updated_at < $1
+			ORDER BY updated_at,id
+			LIMIT $2
+		)
+		DELETE FROM upload_sessions upload USING doomed WHERE upload.id=doomed.id
+	`, cutoff, terminalCleanupBatchSize); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (w *mediaWorker) cleanupExpiredUploads(ctx context.Context) error {

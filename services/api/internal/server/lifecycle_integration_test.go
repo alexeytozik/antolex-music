@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	aws "github.com/aws/aws-sdk-go-v2/aws"
@@ -221,6 +222,123 @@ func TestUploadResumeCancelAndRetryLifecycle(t *testing.T) {
 	if payload.Error.Code != "upload_not_retryable" {
 		t.Fatalf("second retry code=%q; want upload_not_retryable", payload.Error.Code)
 	}
+}
+
+func TestListUploadsReturnsOnlyOperationalQueue(t *testing.T) {
+	db := newLifecycleTestDB(t)
+	ctx := context.Background()
+	srv := &Server{db: db}
+
+	uploading := insertLifecycleUpload(t, db, "uploading", strings.Repeat("a", 64))
+	paused := insertLifecycleUpload(t, db, "paused", strings.Repeat("b", 64))
+	processing := insertLifecycleUpload(t, db, "processing", strings.Repeat("c", 64))
+	failed := insertLifecycleUpload(t, db, "error", strings.Repeat("d", 64))
+	ready := insertLifecycleUpload(t, db, "ready", strings.Repeat("e", 64))
+	cancelled := insertLifecycleUpload(t, db, "paused", strings.Repeat("f", 64))
+	if err := cancelUploadRecord(ctx, db, cancelled.uploadID, cancelled.trackID); err != nil {
+		t.Fatalf("cancel fixture: %v", err)
+	}
+	for _, uploadID := range []string{paused.uploadID, processing.uploadID, failed.uploadID, ready.uploadID, cancelled.uploadID} {
+		if _, err := db.Exec(ctx, `UPDATE upload_sessions SET user_id=$1 WHERE id=$2`, uploading.userID, uploadID); err != nil {
+			t.Fatalf("move upload %s to test user: %v", uploadID, err)
+		}
+	}
+
+	app := fiber.New(fiber.Config{ErrorHandler: handleFiberError})
+	app.Get("/uploads", func(c *fiber.Ctx) error {
+		c.Locals("userID", uploading.userID)
+		return srv.listUploads(c)
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/uploads", nil))
+	if err != nil {
+		t.Fatalf("list uploads: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("list uploads status=%d", response.StatusCode)
+	}
+	var payload uploadsEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode upload queue: %v", err)
+	}
+	statuses := make(map[string]bool, len(payload.Results))
+	for _, upload := range payload.Results {
+		statuses[upload.Status] = true
+	}
+	for _, status := range []string{"uploading", "paused", "processing", "error"} {
+		if !statuses[status] {
+			t.Fatalf("operational status %q missing from %+v", status, statuses)
+		}
+	}
+	if len(payload.Results) != 4 || statuses["ready"] || statuses["cancelled"] {
+		t.Fatalf("queue contains terminal uploads: %+v", statuses)
+	}
+}
+
+func TestTerminalUploadHistoryCleanupPreservesLibraryAndProblems(t *testing.T) {
+	db := newLifecycleTestDB(t)
+	ctx := context.Background()
+	cutoff := time.Now().UTC().Add(-terminalUploadRetention)
+	oldTime := cutoff.Add(-time.Hour)
+	recentTime := cutoff.Add(30 * time.Minute)
+
+	oldReady := insertLifecycleUpload(t, db, "ready", strings.Repeat("a", 64))
+	recentReady := insertLifecycleUpload(t, db, "ready", strings.Repeat("b", 64))
+	failed := insertLifecycleUpload(t, db, "error", strings.Repeat("c", 64))
+	active := insertLifecycleUpload(t, db, "paused", strings.Repeat("d", 64))
+	cancelled := insertLifecycleUpload(t, db, "paused", strings.Repeat("e", 64))
+	if _, err := db.Exec(ctx, `INSERT INTO upload_parts(upload_id,part_number,etag,size_bytes) VALUES($1,1,'old-ready',1),($2,1,'cancelled',1)`, oldReady.uploadID, cancelled.uploadID); err != nil {
+		t.Fatalf("insert terminal parts: %v", err)
+	}
+	if err := cancelUploadRecord(ctx, db, cancelled.uploadID, cancelled.trackID); err != nil {
+		t.Fatalf("cancel fixture: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO track_likes(user_id,track_id) VALUES($1,$2)`, oldReady.userID, oldReady.trackID); err != nil {
+		t.Fatalf("like ready track: %v", err)
+	}
+	var oldSucceededJob, recentSucceededJob, failedJob int64
+	if err := db.QueryRow(ctx, `INSERT INTO media_jobs(kind,track_id,upload_id,status,finished_at,updated_at) VALUES('process_upload',$1,$2,'succeeded',$3,$3) RETURNING id`, oldReady.trackID, oldReady.uploadID, oldTime).Scan(&oldSucceededJob); err != nil {
+		t.Fatalf("insert old succeeded job: %v", err)
+	}
+	if err := db.QueryRow(ctx, `INSERT INTO media_jobs(kind,track_id,upload_id,status,finished_at,updated_at) VALUES('process_upload',$1,$2,'succeeded',$3,$3) RETURNING id`, recentReady.trackID, recentReady.uploadID, recentTime).Scan(&recentSucceededJob); err != nil {
+		t.Fatalf("insert recent succeeded job: %v", err)
+	}
+	if err := db.QueryRow(ctx, `INSERT INTO media_jobs(kind,track_id,upload_id,status,error_message,finished_at,updated_at) VALUES('process_upload',$1,$2,'failed','probe failed',$3,$3) RETURNING id`, failed.trackID, failed.uploadID, oldTime).Scan(&failedJob); err != nil {
+		t.Fatalf("insert failed job: %v", err)
+	}
+	if _, err := db.Exec(ctx, `UPDATE upload_sessions SET updated_at=$1 WHERE id IN ($2,$3,$4,$5)`, oldTime, oldReady.uploadID, cancelled.uploadID, failed.uploadID, active.uploadID); err != nil {
+		t.Fatalf("age upload fixtures: %v", err)
+	}
+	if _, err := db.Exec(ctx, `UPDATE upload_sessions SET updated_at=$1 WHERE id=$2`, recentTime, recentReady.uploadID); err != nil {
+		t.Fatalf("set recent upload time: %v", err)
+	}
+
+	worker := &mediaWorker{db: db}
+	if err := worker.cleanupTerminalUploadHistory(ctx, cutoff); err != nil {
+		t.Fatalf("cleanup terminal upload history: %v", err)
+	}
+
+	assertRowCount := func(label, query string, want int, args ...any) {
+		t.Helper()
+		var got int
+		if err := db.QueryRow(ctx, query, args...).Scan(&got); err != nil {
+			t.Fatalf("count %s: %v", label, err)
+		}
+		if got != want {
+			t.Fatalf("%s rows=%d; want %d", label, got, want)
+		}
+	}
+	assertRowCount("old ready upload", `SELECT COUNT(*) FROM upload_sessions WHERE id=$1`, 0, oldReady.uploadID)
+	assertRowCount("cancelled upload", `SELECT COUNT(*) FROM upload_sessions WHERE id=$1`, 0, cancelled.uploadID)
+	assertRowCount("old terminal parts", `SELECT COUNT(*) FROM upload_parts WHERE upload_id IN ($1,$2)`, 0, oldReady.uploadID, cancelled.uploadID)
+	assertRowCount("old succeeded job", `SELECT COUNT(*) FROM media_jobs WHERE id=$1`, 0, oldSucceededJob)
+	assertRowCount("recent ready upload", `SELECT COUNT(*) FROM upload_sessions WHERE id=$1`, 1, recentReady.uploadID)
+	assertRowCount("recent succeeded job", `SELECT COUNT(*) FROM media_jobs WHERE id=$1`, 1, recentSucceededJob)
+	assertRowCount("failed upload", `SELECT COUNT(*) FROM upload_sessions WHERE id=$1`, 1, failed.uploadID)
+	assertRowCount("failed job", `SELECT COUNT(*) FROM media_jobs WHERE id=$1`, 1, failedJob)
+	assertRowCount("active upload", `SELECT COUNT(*) FROM upload_sessions WHERE id=$1`, 1, active.uploadID)
+	assertRowCount("published track", `SELECT COUNT(*) FROM library_tracks WHERE id=$1 AND status='ready'`, 1, oldReady.trackID)
+	assertRowCount("published like", `SELECT COUNT(*) FROM track_likes WHERE user_id=$1 AND track_id=$2`, 1, oldReady.userID, oldReady.trackID)
 }
 
 func TestWorkerPublishesThenPermanentlyDeletesTrack(t *testing.T) {

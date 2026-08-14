@@ -77,3 +77,20 @@ export async function persistUpload(upload: PersistedUpload) {
     // Uploading still works when private browsing blocks IndexedDB.
   }
 }
+
+export async function removePersistedUploads(localIds: string[]) {
+  if (localIds.length === 0) return;
+  try {
+    const db = await openDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, "readwrite");
+      const store = transaction.objectStore(STORE_NAME);
+      for (const localId of new Set(localIds)) store.delete(localId);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+  } catch {
+    // The visible queue still stays clean when IndexedDB is unavailable.
+  }
+}

@@ -21,6 +21,7 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 13. Add GitHub Actions on the public repository for frontend tests/build, backend test/vet, and production Compose validation. Serialize deployments from `main`, transfer a checksummed release over strict-host-key SSH without third-party deployment actions, activate only after health checks, and keep versioned releases with a shared production environment.
 14. Consolidate the live library around production as the only source of truth. Merge the 13 verified local-only tracks without re-uploading their existing R2 media, retain one canonical M4A playback object plus an optional cover per track, migrate the four legacy `library/` objects, remove verified originals and smoke-test data, and retire the local Docker database immediately after production validation.
 15. Allow any valid email address to request a one-time code. Create or reactivate the user only after the code is verified successfully, while keeping likes isolated by user ID and all authenticated product permissions equal.
+16. Keep Add as an operational queue rather than permanent upload history: hide successful and cancelled entries, retain actionable errors and duplicates until dismissal, and purge terminal upload metadata and successful jobs after one hour without touching published tracks, media, or likes.
 
 ## Production consolidation (completed)
 
