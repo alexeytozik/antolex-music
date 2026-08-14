@@ -49,6 +49,8 @@ export function Player() {
   const recoveryRef = useRef<PlaybackRecovery | null>(null);
   const mountedRef = useRef(false);
   const lastPositionRef = useRef(0);
+  const expandedOpenerRef = useRef<HTMLElement | null>(null);
+  const closeExpandedRef = useRef<HTMLButtonElement | null>(null);
   const [expanded, setExpanded] = useState(false);
   const currentItem = usePlayerStore(selectCurrentItem);
   const hasPlayerNext = usePlayerStore(selectHasNext);
@@ -116,6 +118,19 @@ export function Player() {
     resolveAbortRef.current?.abort();
     resolveAbortRef.current = null;
     recoveryRef.current = null;
+  }
+
+  function openExpandedPlayer() {
+    expandedOpenerRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    setExpanded(true);
+  }
+
+  function closeExpandedPlayer() {
+    setExpanded(false);
+    window.requestAnimationFrame(() => expandedOpenerRef.current?.focus());
   }
 
   function isCurrentRecovery(recovery: PlaybackRecovery) {
@@ -311,8 +326,11 @@ export function Player() {
 
   useEffect(() => {
     if (!expanded) return;
+    closeExpandedRef.current?.focus();
     function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setExpanded(false);
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeExpandedPlayer();
     }
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
@@ -366,9 +384,26 @@ export function Player() {
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !track?.stream_url) return;
+    const requestedQueueId = currentItem?.queueId;
     if (isPlaying) {
-      void audio.play().then(() => setPlaybackStatus("playing")).catch((reason) => {
-        if (isAbortError(reason)) return;
+      void audio.play().then(() => {
+        const player = usePlayerStore.getState();
+        if (
+          selectCurrentItem(player)?.queueId !== requestedQueueId ||
+          !player.isPlaying
+        ) {
+          return;
+        }
+        setPlaybackStatus("playing");
+      }).catch((reason) => {
+        const player = usePlayerStore.getState();
+        if (
+          selectCurrentItem(player)?.queueId !== requestedQueueId ||
+          !player.isPlaying ||
+          isAbortError(reason)
+        ) {
+          return;
+        }
         if (reason instanceof DOMException && reason.name === "NotAllowedError") {
           cancelRecovery();
           setPlaybackStatus("paused", "Tap play to continue");
@@ -432,7 +467,8 @@ export function Player() {
 
   function updateProgress() {
     const audio = audioRef.current;
-    if (!audio) return;
+    const item = selectCurrentItem(usePlayerStore.getState());
+    if (!audio || !item || audio.dataset.queueId !== item.queueId) return;
     if (Number.isFinite(audio.currentTime)) {
       lastPositionRef.current = audio.currentTime;
     }
@@ -440,19 +476,30 @@ export function Player() {
   }
   function loaded() {
     const audio = audioRef.current;
-    if (!audio) return;
+    const item = selectCurrentItem(usePlayerStore.getState());
+    if (!audio || !item || audio.dataset.queueId !== item.queueId) return;
     if (seekTarget !== null) { audio.currentTime = Math.min(seekTarget, audio.duration); clearSeekRequest(); }
     updateProgress();
   }
   function onPlaying() {
+    const audio = audioRef.current;
+    const player = usePlayerStore.getState();
+    const item = selectCurrentItem(player);
+    if (
+      !audio ||
+      !item ||
+      audio.dataset.queueId !== item.queueId ||
+      !player.isPlaying
+    ) {
+      return;
+    }
     cancelRecovery();
     setPlaybackStatus("playing");
   }
   function onError() {
     const audio = audioRef.current;
     const item = selectCurrentItem(usePlayerStore.getState());
-    if (!audio || !item) return;
-    if (audio.dataset.queueId && audio.dataset.queueId !== item.queueId) return;
+    if (!audio || !item || audio.dataset.queueId !== item.queueId) return;
 
     const message = audio.error?.message || "Unable to play this track";
     const decision = classifyMediaError(audio.error);
@@ -463,6 +510,20 @@ export function Player() {
     }
     finishRecovery(message);
   }
+  function onEnded() {
+    const audio = audioRef.current;
+    const player = usePlayerStore.getState();
+    const item = selectCurrentItem(player);
+    if (
+      !audio ||
+      !item ||
+      audio.dataset.queueId !== item.queueId ||
+      !player.isPlaying
+    ) {
+      return;
+    }
+    trackEnded();
+  }
   function changeVolume(value: number) {
     setVolume(value);
     if (muted) setMuted(false);
@@ -470,11 +531,11 @@ export function Player() {
 
   return (
     <>
-      <audio ref={audioRef} preload="metadata" onLoadedMetadata={loaded} onPlaying={onPlaying} onTimeUpdate={updateProgress} onProgress={updateProgress} onEnded={trackEnded} onError={onError} />
+      <audio ref={audioRef} preload="metadata" onLoadedMetadata={loaded} onPlaying={onPlaying} onTimeUpdate={updateProgress} onProgress={updateProgress} onEnded={onEnded} onError={onError} />
       <div className="mobile-player-ui">
         {track && (
           <div className="mini-player">
-            <button type="button" className="mini-track" onClick={() => setExpanded(true)}>
+            <button type="button" className="mini-track" onClick={openExpandedPlayer}>
               <img src={track.cover_url || "/cover-fallback.svg"} alt="" onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = "/cover-fallback.svg"; }} />
               <span><strong>{track.title}</strong><small>{track.artist}</small></span>
               {(status === "resolving" || status === "retrying") && <SpinnerIcon className="h-5 w-5 animate-spin" />}
@@ -487,20 +548,20 @@ export function Player() {
 
         {expanded && track && (
           <section className="full-player" role="dialog" aria-modal="true" aria-label="Now playing">
-            <header><button className="icon-button" type="button" onClick={() => setExpanded(false)}><ChevronDownIcon className="h-6 w-6" /><span className="sr-only">Close player</span></button><strong>Now playing</strong><span /></header>
+            <header><button ref={closeExpandedRef} className="icon-button" type="button" onClick={closeExpandedPlayer}><ChevronDownIcon className="h-6 w-6" /><span className="sr-only">Close player</span></button><strong>Now playing</strong><span /></header>
             <div className="full-player-content">
               <img className="full-cover" src={track.cover_url || "/cover-fallback.svg"} alt="" onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = "/cover-fallback.svg"; }} />
               <div className="full-track-copy"><h2>{track.title}</h2><p>{track.artist}{track.album ? ` · ${track.album}` : ""}</p></div>
               <div className="full-scrubber"><input aria-label="Track position" type="range" min="0" max={displayDuration || 0} step="1" value={progress} onChange={(event) => seek(Number(event.target.value))} /><div><span>{formatDuration(Math.floor(progress))}</span><span>{formatDuration(Math.floor(displayDuration))}</span></div></div>
               <div className="full-controls">
-                <button className={`player-button ${shuffle ? "active" : ""}`} type="button" onClick={() => setShuffle(!shuffle)} aria-label="Shuffle"><ShuffleIcon className="h-6 w-6" /></button>
+                <button className={`player-button ${shuffle ? "active" : ""}`} type="button" onClick={() => setShuffle(!shuffle)} aria-label="Shuffle" aria-pressed={shuffle}><ShuffleIcon className="h-6 w-6" /></button>
                 <button className="player-button" type="button" onClick={previous} disabled={!hasPrevious} aria-label="Previous"><PreviousIcon className="h-7 w-7" /></button>
                 <button className="play-main" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"}>{isPlaying ? <PauseIcon className="h-8 w-8" /> : <PlayIcon className="h-8 w-8" />}</button>
                 <button className="player-button" type="button" onClick={() => { void next(); }} disabled={!hasNext} aria-label="Next"><NextIcon className="h-7 w-7" /></button>
                 <span className="control-spacer" />
               </div>
               <label className="volume-control"><VolumeIcon className="h-5 w-5" /><span className="sr-only">Volume</span><input type="range" min="0" max="1" step="0.01" value={volume} onChange={(event) => changeVolume(Number(event.target.value))} /></label>
-              {error && <p className="notice notice-error">{error}</p>}
+              {error && <p className="notice notice-error" role="alert">{error}</p>}
             </div>
           </section>
         )}
@@ -519,7 +580,7 @@ export function Player() {
             </div>
 
             <div className="desktop-player-controls">
-              <button className={`player-button ${shuffle ? "active" : ""}`} type="button" onClick={() => setShuffle(!shuffle)} disabled={!track} aria-label="Shuffle"><ShuffleIcon className="h-6 w-6" /></button>
+              <button className={`player-button ${shuffle ? "active" : ""}`} type="button" onClick={() => setShuffle(!shuffle)} disabled={!track} aria-label="Shuffle" aria-pressed={shuffle}><ShuffleIcon className="h-6 w-6" /></button>
               <button className="player-button outlined" type="button" onClick={previous} disabled={!hasPrevious} aria-label="Previous"><PreviousIcon className="h-6 w-6" /></button>
               <button className="play-main desktop-play-main" type="button" onClick={togglePlayback} disabled={!track} aria-label={isPlaying ? "Pause" : "Play"}>{isPlaying ? <PauseIcon className="h-7 w-7" /> : <PlayIcon className="h-7 w-7" />}</button>
               <button className="player-button outlined" type="button" onClick={() => { void next(); }} disabled={!hasNext} aria-label="Next"><NextIcon className="h-6 w-6" /></button>
@@ -539,7 +600,7 @@ export function Player() {
             </div>
             <div><span>{formatDuration(Math.floor(progress))}</span><span>{track ? formatDuration(Math.floor(displayDuration)) : "--:--"}</span></div>
           </div>
-          {error && <p className="desktop-player-error">{error}</p>}
+          {error && <p className="desktop-player-error" role="alert">{error}</p>}
         </div>
       </footer>
     </>

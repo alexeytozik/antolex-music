@@ -79,6 +79,32 @@ describe('player store queue session', () => {
     expect(store.getState().queue[1]?.track.external_id).toBe('track-2');
   });
 
+  it('pauses playback on sign out without losing the current queue or position', () => {
+    const store = createPlayerStore(`test-player-${crypto.randomUUID()}`, createTestStorage());
+    store.getState().setSession(null, {
+      id: 'user-1',
+      email: 'listener@example.com',
+      created_at: '2026-08-14T00:00:00Z',
+    }, '2026-09-13T00:00:00Z');
+    store.getState().replaceQueue([makeTrack(1)], 0, true);
+    store.getState().setPlaybackProgress(42, 181, 60);
+    store.setState({ shuffleLoading: true });
+    const shuffleRequestId = store.getState().shuffleRequestId;
+
+    store.getState().clearSession();
+
+    expect(store.getState()).toMatchObject({
+      user: null,
+      isPlaying: false,
+      status: 'paused',
+      currentIndex: 0,
+      currentTime: 42,
+      shuffleLoading: false,
+      shuffleRequestId: shuffleRequestId + 1,
+    });
+    expect(store.getState().queue[0]?.track.external_id).toBe('track-1');
+  });
+
   it('restarts the current track when previous is pressed after progress threshold', () => {
     const store = createPlayerStore(`test-player-${crypto.randomUUID()}`, createTestStorage());
     const tracks = [

@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 
 import { HeartIcon, LogOutIcon, PlusIcon, SearchIcon, UserIcon } from "./Icons";
 import { Player } from "./Player";
 import { api } from "../lib/api";
+import { isGlobalPlaybackShortcut } from "../lib/playback-shortcuts";
 import { selectCurrentItem, usePlayerStore } from "../store/player-store";
 
 export function Shell() {
@@ -16,6 +17,24 @@ export function Shell() {
     { to: "/liked", label: "Liked", icon: HeartIcon },
     { to: "/add", label: "Add", icon: PlusIcon },
   ];
+
+  useEffect(() => {
+    function toggleWithSpace(event: KeyboardEvent) {
+      if (!isGlobalPlaybackShortcut(event)) return;
+
+      const player = usePlayerStore.getState();
+      if (!player.user || !selectCurrentItem(player)) return;
+
+      // Prevent page scrolling for both the initial event and key repeats, but
+      // only toggle once while Space is held down.
+      event.preventDefault();
+      if (event.repeat) return;
+      player.togglePlayback();
+    }
+
+    window.addEventListener("keydown", toggleWithSpace);
+    return () => window.removeEventListener("keydown", toggleWithSpace);
+  }, []);
 
   async function signOut() {
     if (signingOut) return;

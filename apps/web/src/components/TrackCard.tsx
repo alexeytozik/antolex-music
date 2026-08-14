@@ -1,14 +1,14 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { HeartIcon, PlayIcon, SpinnerIcon } from "./Icons";
+import { HeartIcon, PauseIcon, PlayIcon, SpinnerIcon } from "./Icons";
 import { formatDuration } from "../lib/format";
 import {
   startQueueContinuation,
   stopQueueContinuation,
   type QueueContinuationSource,
 } from "../store/queue-continuation-store";
-import { usePlayerStore } from "../store/player-store";
+import { selectCurrentItem, usePlayerStore } from "../store/player-store";
 import type { Track } from "../types";
 
 type TrackQueueContinuation = {
@@ -38,12 +38,23 @@ export function TrackCard({
   const navigate = useNavigate();
   const playNow = usePlayerStore((state) => state.playNow);
   const replaceQueue = usePlayerStore((state) => state.replaceQueue);
+  const currentItem = usePlayerStore(selectCurrentItem);
+  const isPlaying = usePlayerStore((state) => state.isPlaying);
   const toggleLike = usePlayerStore((state) => state.toggleLike);
   const isLiked = usePlayerStore((state) => state.isLiked);
   const user = usePlayerStore((state) => state.user);
   const liked = isLiked(track.external_id);
+  const isCurrent = currentItem?.track.external_id === track.external_id;
+  const isCurrentPlaying = isCurrent && isPlaying;
+  const playbackLabel = `${isCurrentPlaying ? "Pause" : "Play"} ${track.title}`;
 
   function handlePlay() {
+    const player = usePlayerStore.getState();
+    if (selectCurrentItem(player)?.track.external_id === track.external_id) {
+      player.togglePlayback();
+      return;
+    }
+
     if (queue && typeof queueIndex === "number") {
       replaceQueue(queue, queueIndex, true);
       if (usePlayerStore.getState().shuffleEnabled) {
@@ -83,12 +94,15 @@ export function TrackCard({
   }
 
   return (
-    <article className="track-card">
+    <article
+      className={`track-card ${isCurrent ? "is-current" : ""}`}
+      aria-current={isCurrent ? "true" : undefined}
+    >
       <button
         type="button"
         className="track-cover-button"
         onClick={handlePlay}
-        aria-label={`Play ${track.title}`}
+        aria-label={playbackLabel}
       >
         <img
           src={track.cover_url || "/cover-fallback.svg"}
@@ -98,10 +112,12 @@ export function TrackCard({
             event.currentTarget.src = "/cover-fallback.svg";
           }}
         />
-        <span className="cover-play"><PlayIcon className="h-5 w-5" /></span>
+        <span className="cover-play">
+          {isCurrentPlaying ? <PauseIcon className="h-5 w-5" /> : <PlayIcon className="h-5 w-5" />}
+        </span>
       </button>
 
-      <button type="button" className="track-copy" onClick={handlePlay}>
+      <button type="button" className="track-copy" onClick={handlePlay} aria-label={playbackLabel}>
         <strong>{track.title}</strong>
         <span>{track.artist}{track.album ? ` · ${track.album}` : ""}</span>
       </button>
@@ -112,9 +128,9 @@ export function TrackCard({
         type="button"
         onClick={() => void handleLike()}
         disabled={busy}
-      aria-label={liked ? "Remove from liked songs" : "Add to liked songs"}
-      className={`icon-button track-like ${liked ? "is-active" : ""}`}
-    >
+        aria-label={liked ? "Remove from liked songs" : "Add to liked songs"}
+        className={`icon-button track-like ${liked ? "is-active" : ""}`}
+      >
         {busy ? (
           <SpinnerIcon className="h-5 w-5 animate-spin" />
         ) : (
@@ -126,9 +142,9 @@ export function TrackCard({
         type="button"
         className="icon-button desktop-track-play"
         onClick={handlePlay}
-        aria-label={`Play ${track.title}`}
+        aria-label={playbackLabel}
       >
-        <PlayIcon className="h-5 w-5" />
+        {isCurrentPlaying ? <PauseIcon className="h-5 w-5" /> : <PlayIcon className="h-5 w-5" />}
       </button>
 
       {error && <p className="track-error">{error}</p>}

@@ -625,13 +625,22 @@ export function createPlayerStore(
         activeRequestId: 0,
         setSession: (_token, user, sessionExpiresAt) =>
           set({ token: null, user: normalizeUser(user), sessionExpiresAt }),
-        clearSession: () =>
-          set({
+        clearSession: () => {
+          resetShuffleRetry();
+          shuffleRequestPromise = null;
+          stopQueueContinuation();
+          set((state) => ({
             token: null,
             user: null,
             sessionExpiresAt: null,
             likedExternalIDs: [],
-          }),
+            isPlaying: false,
+            status: state.queue.length ? "paused" : "idle",
+            pendingAdvanceQueueContextId: null,
+            shuffleLoading: false,
+            shuffleRequestId: state.shuffleRequestId + 1,
+          }));
+        },
         replaceQueue: (tracks, startIndex = 0, autoplay = true) => {
           resetShuffleRetry();
           const queue = tracks.map(createQueueItem);
