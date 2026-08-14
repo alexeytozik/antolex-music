@@ -1,12 +1,25 @@
-<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">ANTOLEX Music cover placeholder</title>
+  <desc id="desc">Abstract mint waveform on a dark album cover</desc>
   <defs>
-    <linearGradient id="coverNoteGradient" x1="94" y1="72" x2="162" y2="174" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#27F0C2"/>
-      <stop offset="1" stop-color="#14D6C8"/>
+    <linearGradient id="mint" x1="116" y1="101" x2="400" y2="411" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#71FFD2"/>
+      <stop offset="1" stop-color="#18CFA8"/>
     </linearGradient>
+    <radialGradient id="surface" cx="0" cy="0" r="1" gradientTransform="translate(166 118) rotate(52) scale(512)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#173C32"/>
+      <stop offset=".55" stop-color="#0C1B17"/>
+      <stop offset="1" stop-color="#070C0B"/>
+    </radialGradient>
+    <filter id="glow" x="52" y="76" width="408" height="364" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
   </defs>
-  <rect width="256" height="256" rx="42" fill="#14161B"/>
-  <rect x="18" y="18" width="220" height="220" rx="34" fill="#181B22"/>
-  <rect x="18.75" y="18.75" width="218.5" height="218.5" rx="33.25" stroke="#FFFFFF" stroke-opacity="0.05"/>
-  <path d="M156 78C156 75.7909 154.209 74 152 74C151.616 74 151.233 74.0553 150.864 74.1643L111.864 85.6722C108.475 86.6727 106.154 89.7834 106.154 93.3174V144.233C101.231 141.835 95.0224 141.111 88.7626 142.532C77.3134 145.13 69.1051 154.503 70.3939 163.466C71.6827 172.429 81.9807 177.581 93.4299 174.983C103.733 172.645 111.415 164.943 111.832 157.027L112 157.033V112.933L148 102.314V130.233C143.077 127.835 136.869 127.111 130.609 128.532C119.16 131.13 110.951 140.503 112.24 149.466C113.529 158.429 123.827 163.581 135.276 160.983C145.579 158.645 153.261 150.943 153.679 143.027L153.846 143.033V78H156Z" fill="url(#coverNoteGradient)"/>
+  <rect width="512" height="512" rx="72" fill="url(#surface)"/>
+  <circle cx="256" cy="256" r="174" fill="none" stroke="#CFFFF0" stroke-opacity=".07" stroke-width="2"/>
+  <circle cx="256" cy="256" r="132" fill="none" stroke="#CFFFF0" stroke-opacity=".06" stroke-width="2"/>
+  <path d="M104 272c38 0 38-70 76-70s38 140 76 140 38-188 76-188 38 118 76 118" fill="none" stroke="#22DDB0" stroke-opacity=".2" stroke-width="34" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M104 272c38 0 38-70 76-70s38 140 76 140 38-188 76-188 38 118 76 118" fill="none" stroke="url(#mint)" stroke-width="22" stroke-linecap="round"/>
+  <circle cx="104" cy="272" r="11" fill="#71FFD2"/>
+  <circle cx="408" cy="272" r="11" fill="#18CFA8"/>
 </svg>

@@ -6,13 +6,24 @@ import {
 } from "zustand/middleware";
 
 import { APIError, api } from "../lib/api";
+import {
+  startQueueContinuation,
+  stopQueueContinuation,
+  useQueueContinuationStore,
+  type QueueContinuationSource,
+} from "./queue-continuation-store";
 import type { Track, User } from "../types";
 
-const DEFAULT_PLAYER_STORAGE_KEY = "tozikron-player";
+const DEFAULT_PLAYER_STORAGE_KEY = "antolex-music-player-v1";
+const LEGACY_PLAYER_STORAGE_KEY = "tozikron-player";
 const STREAM_TTL_MS = 10 * 60 * 1000;
 const PREVIOUS_RESTART_THRESHOLD_SECONDS = 3;
+const LEGACY_COVER_CACHE_VERSION = "g1";
+const SHUFFLE_STATE_VERSION = 1;
+const QUEUE_HISTORY_LIMIT = 40;
+const QUEUE_FUTURE_PERSIST_LIMIT = 80;
+const SHUFFLE_RETRY_MAX_DELAY_MS = 30_000;
 
-export type RepeatMode = "off" | "all" | "one";
 export type PlaybackStatus =
   | "idle"
   | "resolving"
@@ -44,13 +55,29 @@ type PersistedPlayerState = {
   sessionExpiresAt: string | null;
   volume: number;
   muted: boolean;
-  repeatMode: RepeatMode;
   shuffleEnabled: boolean;
+  shuffleStateVersion: number;
+  shuffleCursor: string | null;
+  shuffleExcludedExternalID: string | null;
+  shuffleCycleComplete: boolean;
+  shuffleCycleHasTracks: boolean;
+  queueContextId: string;
+  queueTruncated: boolean;
+  preShuffleQueue: PersistedQueueItem[];
+  preShuffleContinuation: SavedQueueContinuation | null;
   queue: PersistedQueueItem[];
   currentIndex: number;
+  currentTime: number;
 };
 
 type QueueInput = Track | Track[];
+
+type SavedQueueContinuation = {
+  source: QueueContinuationSource;
+  cursor: string | null;
+  page: number;
+  hasMore: boolean;
+};
 
 type PlayerState = {
   token: string | null;
@@ -64,15 +91,28 @@ type PlayerState = {
   isPlaying: boolean;
   volume: number;
   muted: boolean;
-  repeatMode: RepeatMode;
   shuffleEnabled: boolean;
+  shuffleCursor: string | null;
+  shuffleExcludedExternalID: string | null;
+  shuffleCycleComplete: boolean;
+  shuffleCycleHasTracks: boolean;
+  shuffleLoading: boolean;
+  shuffleRequestId: number;
+  queueContextId: string;
+  pendingAdvanceQueueContextId: string | null;
+  preShuffleQueue: QueueItem[];
+  preShuffleContinuation: SavedQueueContinuation | null;
   currentTime: number;
   duration: number;
   bufferedTo: number;
   seekTarget: number | null;
   error: string | null;
   activeRequestId: number;
-  setSession: (token: string, user: User, sessionExpiresAt: string) => void;
+  setSession: (
+    token: string | null | undefined,
+    user: User,
+    sessionExpiresAt: string,
+  ) => void;
   clearSession: () => void;
   replaceQueue: (
     tracks: Track[],
@@ -84,13 +124,17 @@ type PlayerState = {
   appendToQueue: (input: QueueInput) => void;
   playAt: (index: number, autoplay?: boolean) => void;
   togglePlayback: () => void;
-  next: () => void;
+  next: () => Promise<boolean>;
   previous: () => void;
   clearQueue: () => void;
   setVolume: (value: number) => void;
   setMuted: (value: boolean) => void;
-  setRepeatMode: (mode: RepeatMode) => void;
   setShuffleEnabled: (value: boolean) => void;
+  prefetchShuffle: () => Promise<boolean>;
+  cancelPendingAdvance: (
+    expectedQueueContextId: string,
+    error?: string | null,
+  ) => void;
   seek: (seconds: number) => void;
   clearSeekRequest: () => void;
   beginRetryCurrentTrack: () => boolean;
@@ -116,6 +160,10 @@ function createQueueId() {
   );
 }
 
+function createQueueContextId() {
+  return `context-${createQueueId()}`;
+}
+
 function normalizeTracks(input: QueueInput) {
   return Array.isArray(input) ? input : [input];
 }
@@ -133,10 +181,23 @@ function createQueueItem(track: Track): QueueItem {
   };
 }
 
+function migrateLegacyCoverURL(coverURL: string) {
+  if (
+    !coverURL.includes("?") &&
+    /^\/api\/v1\/tracks\/[^/]+\/cover$/.test(coverURL)
+  ) {
+    return `${coverURL}?v=${LEGACY_COVER_CACHE_VERSION}`;
+  }
+  return coverURL;
+}
+
 function hydratePersistedQueueItem(item: PersistedQueueItem): QueueItem {
   return {
     queueId: item.queueId,
-    track: item.track,
+    track: {
+      ...item.track,
+      cover_url: migrateLegacyCoverURL(item.track.cover_url),
+    },
     resolvedStreamUrl: null,
     resolvedAt: null,
     resolveStatus: "idle",
@@ -157,6 +218,15 @@ function isTrackLike(value: unknown): value is Track {
     typeof candidate.artist === "string" &&
     typeof candidate.cover_url === "string"
   );
+}
+
+function normalizeUser(user: User): User {
+  return {
+    id: user.id,
+    email: user.email,
+    active: user.active,
+    created_at: user.created_at,
+  };
 }
 
 function sanitizePersistedQueue(input: unknown): QueueItem[] {
@@ -193,11 +263,71 @@ function sanitizePersistedQueue(input: unknown): QueueItem[] {
     .filter((item): item is QueueItem => item !== null);
 }
 
+function sanitizeSavedQueueContinuation(
+  input: unknown,
+): SavedQueueContinuation | null {
+  if (!input || typeof input !== "object") return null;
+  const candidate = input as Partial<SavedQueueContinuation>;
+  const source = candidate.source;
+  if (
+    !source ||
+    (source.kind !== "likes" &&
+      !(source.kind === "search" && typeof source.query === "string"))
+  ) {
+    return null;
+  }
+  return {
+    source,
+    cursor: typeof candidate.cursor === "string" ? candidate.cursor : null,
+    page:
+      typeof candidate.page === "number" && Number.isFinite(candidate.page)
+        ? Math.max(1, Math.floor(candidate.page))
+        : 1,
+    hasMore: candidate.hasMore === true,
+  };
+}
+
 function clampIndex(index: number, length: number) {
   if (length === 0) {
     return -1;
   }
   return Math.min(Math.max(index, 0), length - 1);
+}
+
+function compactConsumedQueue(
+  queue: QueueItem[],
+  currentIndex: number,
+  history: number[],
+) {
+  const keepFrom = Math.max(0, currentIndex - QUEUE_HISTORY_LIMIT);
+  if (keepFrom === 0) return { queue, currentIndex, history };
+  return {
+    queue: queue.slice(keepFrom),
+    currentIndex: currentIndex - keepFrom,
+    history: history
+      .filter((index) => index >= keepFrom)
+      .map((index) => index - keepFrom),
+  };
+}
+
+function compactQueueForPersistence(
+  queue: QueueItem[],
+  currentIndex: number,
+  history: number[],
+) {
+  const keepFrom = Math.max(0, currentIndex - QUEUE_HISTORY_LIMIT);
+  const keepThrough = Math.min(
+    queue.length,
+    Math.max(0, currentIndex + 1) + QUEUE_FUTURE_PERSIST_LIMIT,
+  );
+  return {
+    queue: queue.slice(keepFrom, keepThrough),
+    currentIndex: currentIndex >= 0 ? currentIndex - keepFrom : -1,
+    history: history
+      .filter((index) => index >= keepFrom && index < keepThrough)
+      .map((index) => index - keepFrom),
+    truncated: keepThrough < queue.length,
+  };
 }
 
 function isSessionExpired(sessionExpiresAt: string | null) {
@@ -236,13 +366,6 @@ function computeManualNextIndex(state: PlayerState) {
     return null;
   }
 
-  if (state.shuffleEnabled && state.queue.length > 1) {
-    const candidates = state.queue
-      .map((_, index) => index)
-      .filter((index) => index !== state.currentIndex);
-    return candidates[Math.floor(Math.random() * candidates.length)] ?? null;
-  }
-
   const nextIndex = state.currentIndex + 1;
   if (nextIndex < state.queue.length) {
     return nextIndex;
@@ -251,8 +374,35 @@ function computeManualNextIndex(state: PlayerState) {
   return null;
 }
 
-function computeEndedNextIndex(state: PlayerState) {
-  return computeManualNextIndex(state);
+function canWaitForQueueContinuation(state: PlayerState) {
+  if (state.shuffleEnabled || state.currentIndex < 0) return false;
+  const continuation = useQueueContinuationStore.getState();
+  return (
+    continuation.source !== null &&
+    continuation.source.kind !== "shuffle" &&
+    continuation.queueContextId === state.queueContextId &&
+    continuation.hasMore &&
+    Boolean(continuation.cursor)
+  );
+}
+
+function isRetryableShuffleContinuationError(reason: unknown) {
+  if (reason instanceof TypeError) return true;
+  if (!reason || typeof reason !== "object" || !("status" in reason)) {
+    return false;
+  }
+  const status = (reason as { status?: unknown }).status;
+  return (
+    typeof status === "number" &&
+    (status === 408 || status === 429 || status >= 500)
+  );
+}
+
+function shuffleContinuationRetryDelay(attempt: number) {
+  return Math.min(
+    500 * 2 ** Math.min(Math.max(0, attempt - 1), 6),
+    SHUFFLE_RETRY_MAX_DELAY_MS,
+  );
 }
 
 function computeHasPrevious(state: PlayerState) {
@@ -294,6 +444,7 @@ function moveToIndex(
     bufferedTo: 0,
     seekTarget: null,
     error: null,
+    pendingAdvanceQueueContextId: null,
   };
 }
 
@@ -337,7 +488,16 @@ export function selectCurrentTrack(state: PlayerState) {
 }
 
 export function selectHasNext(state: PlayerState) {
-  return computeManualNextIndex(state) !== null;
+  if (state.shuffleEnabled && state.currentIndex >= 0) {
+    if (state.currentIndex + 1 < state.queue.length) return true;
+    if (state.shuffleLoading) return true;
+    if (!state.shuffleCycleComplete) return true;
+    return state.shuffleCycleHasTracks;
+  }
+  return (
+    computeManualNextIndex(state) !== null ||
+    canWaitForQueueContinuation(state)
+  );
 }
 
 export function selectHasPrevious(state: PlayerState) {
@@ -373,7 +533,66 @@ export function createPlayerStore(
   storageKey = DEFAULT_PLAYER_STORAGE_KEY,
   storage?: StateStorage,
 ) {
-  return create<PlayerState>()(
+  let shuffleRequestPromise: Promise<boolean> | null = null;
+  let shuffleRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let shuffleOnlineRetry: (() => void) | null = null;
+  let shuffleRetryAttempt = 0;
+
+  const clearShuffleRetryWaiters = () => {
+    if (shuffleRetryTimer !== null) {
+      clearTimeout(shuffleRetryTimer);
+      shuffleRetryTimer = null;
+    }
+    if (shuffleOnlineRetry && typeof window !== "undefined") {
+      window.removeEventListener("online", shuffleOnlineRetry);
+      shuffleOnlineRetry = null;
+    }
+  };
+
+  const resetShuffleRetry = () => {
+    clearShuffleRetryWaiters();
+    shuffleRetryAttempt = 0;
+  };
+
+  const scheduleShuffleRetry = (expectedQueueContextId: string) => {
+    clearShuffleRetryWaiters();
+    const retry = () => {
+      clearShuffleRetryWaiters();
+      const state = getStoreState();
+      if (
+        !state.shuffleEnabled ||
+        state.queueContextId !== expectedQueueContextId ||
+        state.pendingAdvanceQueueContextId !== expectedQueueContextId
+      ) {
+        shuffleRetryAttempt = 0;
+        return;
+      }
+      void state.prefetchShuffle();
+    };
+
+    if (
+      typeof window !== "undefined" &&
+      typeof navigator !== "undefined" &&
+      navigator.onLine === false
+    ) {
+      shuffleOnlineRetry = () => {
+        setTimeout(retry, 0);
+      };
+      window.addEventListener("online", shuffleOnlineRetry, { once: true });
+      return;
+    }
+
+    shuffleRetryAttempt += 1;
+    shuffleRetryTimer = setTimeout(
+      retry,
+      shuffleContinuationRetryDelay(shuffleRetryAttempt),
+    );
+  };
+
+  let getStoreState: () => PlayerState = () => {
+    throw new Error("Player store has not initialized");
+  };
+  const store = create<PlayerState>()(
     persist(
       (set, get) => ({
         token: null,
@@ -387,16 +606,25 @@ export function createPlayerStore(
         isPlaying: false,
         volume: 0.8,
         muted: false,
-        repeatMode: "off",
         shuffleEnabled: false,
+        shuffleCursor: null,
+        shuffleExcludedExternalID: null,
+        shuffleCycleComplete: false,
+        shuffleCycleHasTracks: false,
+        shuffleLoading: false,
+        shuffleRequestId: 0,
+        queueContextId: createQueueContextId(),
+        pendingAdvanceQueueContextId: null,
+        preShuffleQueue: [],
+        preShuffleContinuation: null,
         currentTime: 0,
         duration: 0,
         bufferedTo: 0,
         seekTarget: null,
         error: null,
         activeRequestId: 0,
-        setSession: (token, user, sessionExpiresAt) =>
-          set({ token, user, sessionExpiresAt }),
+        setSession: (_token, user, sessionExpiresAt) =>
+          set({ token: null, user: normalizeUser(user), sessionExpiresAt }),
         clearSession: () =>
           set({
             token: null,
@@ -405,13 +633,17 @@ export function createPlayerStore(
             likedExternalIDs: [],
           }),
         replaceQueue: (tracks, startIndex = 0, autoplay = true) => {
+          resetShuffleRetry();
           const queue = tracks.map(createQueueItem);
           const currentIndex = clampIndex(startIndex, queue.length);
           const currentItem = currentIndex >= 0 ? queue[currentIndex] : null;
+          if (get().shuffleEnabled) shuffleRequestPromise = null;
 
-          set({
-            queue,
-            currentIndex,
+          set((state) => ({
+            queue:
+              state.shuffleEnabled && currentItem ? [currentItem] : queue,
+            currentIndex:
+              state.shuffleEnabled && currentItem ? 0 : currentIndex,
             history: [],
             isPlaying: autoplay && currentItem !== null,
             status: currentItem
@@ -426,7 +658,30 @@ export function createPlayerStore(
             bufferedTo: 0,
             seekTarget: null,
             error: null,
-          });
+            shuffleCursor: null,
+            shuffleExcludedExternalID:
+              state.shuffleEnabled && currentItem
+                ? currentItem.track.external_id
+                : null,
+            shuffleCycleComplete: false,
+            shuffleCycleHasTracks: false,
+            shuffleLoading: false,
+            shuffleRequestId: state.shuffleRequestId + 1,
+            queueContextId: createQueueContextId(),
+            pendingAdvanceQueueContextId: null,
+            preShuffleQueue:
+              state.shuffleEnabled && currentItem
+                ? queue
+                : state.preShuffleQueue,
+            preShuffleContinuation:
+              state.shuffleEnabled
+                ? null
+                : state.preShuffleContinuation,
+          }));
+
+          if (get().shuffleEnabled && currentItem) {
+            void get().prefetchShuffle();
+          }
         },
         playNow: (track) => {
           get().replaceQueue([track], 0, true);
@@ -457,9 +712,37 @@ export function createPlayerStore(
         appendToQueue: (input) => {
           const items = normalizeTracks(input).map(createQueueItem);
           set((state) => {
-            const queue = [...state.queue, ...items];
+            if (state.shuffleEnabled) {
+              return {};
+            }
+            const compacted = compactConsumedQueue(
+              state.queue,
+              state.currentIndex,
+              state.history,
+            );
+            const queue = [...compacted.queue, ...items];
             if (state.currentIndex >= 0) {
-              return { queue };
+              if (
+                state.pendingAdvanceQueueContextId === state.queueContextId &&
+                items.length > 0
+              ) {
+                return moveToIndex(
+                  {
+                    ...state,
+                    queue,
+                    currentIndex: compacted.currentIndex,
+                    history: compacted.history,
+                  },
+                  compacted.currentIndex + 1,
+                  true,
+                  compacted.history,
+                );
+              }
+              return {
+                queue,
+                currentIndex: compacted.currentIndex,
+                history: compacted.history,
+              };
             }
 
             return {
@@ -470,15 +753,18 @@ export function createPlayerStore(
             };
           });
         },
-        playAt: (index, autoplay = true) =>
+        playAt: (index, autoplay = true) => {
+          resetShuffleRetry();
           set((state) => {
             const nextIndex = clampIndex(index, state.queue.length);
             if (nextIndex < 0) {
               return {};
             }
             return moveToIndex(state, nextIndex, autoplay);
-          }),
-        togglePlayback: () =>
+          });
+        },
+        togglePlayback: () => {
+          resetShuffleRetry();
           set((state) => {
             const currentItem = selectCurrentItem(state);
             if (!currentItem) {
@@ -494,25 +780,120 @@ export function createPlayerStore(
                   : "resolving"
                 : "paused",
               error: null,
+              pendingAdvanceQueueContextId: null,
             };
-          }),
-        next: () =>
-          set((state) => {
-            const nextIndex = computeManualNextIndex(state);
-            if (nextIndex === null) {
-              return {
-                isPlaying: false,
-                status: state.queue.length > 0 ? "paused" : "idle",
-              };
+          });
+        },
+        next: async () => {
+          let snapshot = get();
+          let nextIndex = computeManualNextIndex(snapshot);
+          if (nextIndex !== null) {
+            set((state) => {
+              const index = computeManualNextIndex(state);
+              if (index === null) return {};
+              const history = state.shuffleEnabled
+                ? [...state.history, state.currentIndex]
+                : state.history;
+              return moveToIndex(state, index, true, history);
+            });
+            return true;
+          }
+
+          if (!snapshot.shuffleEnabled || snapshot.currentIndex < 0) {
+            if (canWaitForQueueContinuation(snapshot)) {
+              set({
+                pendingAdvanceQueueContextId: snapshot.queueContextId,
+                isPlaying: true,
+                status: "retrying",
+                error: null,
+              });
+              return true;
+            }
+            set({
+              isPlaying: false,
+              status: snapshot.queue.length > 0 ? "paused" : "idle",
+            });
+            return false;
+          }
+
+          if (snapshot.shuffleCycleComplete) {
+            if (!snapshot.shuffleCycleHasTracks) {
+              set({ isPlaying: false, status: "paused" });
+              return false;
             }
 
-            const history = state.shuffleEnabled
-              ? [...state.history, state.currentIndex]
-              : state.history;
+            const currentItem = selectCurrentItem(snapshot);
+            if (!currentItem) return false;
+            shuffleRequestPromise = null;
+            set((state) => ({
+              queue: [currentItem],
+              currentIndex: 0,
+              history: [],
+              shuffleCursor: null,
+              shuffleExcludedExternalID: currentItem.track.external_id,
+              shuffleCycleComplete: false,
+              shuffleCycleHasTracks: false,
+              shuffleLoading: false,
+              shuffleRequestId: state.shuffleRequestId + 1,
+              error: null,
+            }));
+          }
 
-            return moveToIndex(state, nextIndex, true, history);
-          }),
-        previous: () =>
+          snapshot = get();
+          const waitingItem = selectCurrentItem(snapshot);
+          if (!waitingItem) return false;
+          const expectedQueueContextId = snapshot.queueContextId;
+          const expectedQueueId = waitingItem.queueId;
+          set({
+            pendingAdvanceQueueContextId: expectedQueueContextId,
+            isPlaying: true,
+            status: "retrying",
+            error: null,
+          });
+
+          await get().prefetchShuffle();
+          snapshot = get();
+          if (
+            !snapshot.shuffleEnabled ||
+            snapshot.queueContextId !== expectedQueueContextId
+          ) {
+            return false;
+          }
+          if (selectCurrentItem(snapshot)?.queueId !== expectedQueueId) {
+            return true;
+          }
+          if (
+            snapshot.pendingAdvanceQueueContextId !== expectedQueueContextId
+          ) {
+            return false;
+          }
+          nextIndex = computeManualNextIndex(snapshot);
+          if (nextIndex === null) {
+            if (
+              snapshot.shuffleCycleComplete &&
+              !snapshot.shuffleCycleHasTracks
+            ) {
+              get().cancelPendingAdvance(expectedQueueContextId);
+              return false;
+            }
+            return true;
+          }
+
+          resetShuffleRetry();
+          set((state) => {
+            const index = computeManualNextIndex(state);
+            if (index === null) return {};
+            return moveToIndex(
+              state,
+              index,
+              true,
+              [...state.history, state.currentIndex],
+            );
+          });
+          return true;
+        },
+        previous: () => {
+          resetShuffleRetry();
           set((state) => {
             if (state.currentIndex < 0) {
               return {};
@@ -524,6 +905,7 @@ export function createPlayerStore(
                 currentTime: 0,
                 status: state.isPlaying ? "ready" : "paused",
                 error: null,
+                pendingAdvanceQueueContextId: null,
               };
             }
 
@@ -542,13 +924,16 @@ export function createPlayerStore(
                 currentTime: 0,
                 status: state.isPlaying ? "ready" : "paused",
                 error: null,
+                pendingAdvanceQueueContextId: null,
               };
             }
 
             return moveToIndex(state, previousIndex, true);
-          }),
-        clearQueue: () =>
-          set({
+          });
+        },
+        clearQueue: () => {
+          resetShuffleRetry();
+          set((state) => ({
             queue: [],
             currentIndex: -1,
             history: [],
@@ -559,11 +944,284 @@ export function createPlayerStore(
             bufferedTo: 0,
             seekTarget: null,
             error: null,
-          }),
+            shuffleCursor: null,
+            shuffleExcludedExternalID: null,
+            shuffleCycleComplete: false,
+            shuffleCycleHasTracks: false,
+            shuffleLoading: false,
+            shuffleRequestId: state.shuffleRequestId + 1,
+            queueContextId: createQueueContextId(),
+            pendingAdvanceQueueContextId: null,
+            preShuffleQueue: [],
+            preShuffleContinuation: null,
+          }));
+        },
         setVolume: (value) => set({ volume: Math.min(Math.max(value, 0), 1) }),
         setMuted: (value) => set({ muted: value }),
-        setRepeatMode: (mode) => set({ repeatMode: mode }),
-        setShuffleEnabled: (value) => set({ shuffleEnabled: value }),
+        setShuffleEnabled: (value) => {
+          const snapshot = get();
+          if (snapshot.shuffleEnabled === value) return;
+          resetShuffleRetry();
+          shuffleRequestPromise = null;
+
+          if (!value) {
+            const currentItem = selectCurrentItem(snapshot);
+            const savedQueue = snapshot.preShuffleQueue;
+            const savedContinuation = snapshot.preShuffleContinuation;
+            const savedCurrentIndex = currentItem
+              ? savedQueue.findIndex(
+                  (item) =>
+                    item.track.external_id ===
+                    currentItem.track.external_id,
+                )
+              : -1;
+            const restoredQueue = currentItem
+              ? savedCurrentIndex >= 0
+                ? savedQueue.map((item, index) =>
+                    index === savedCurrentIndex ? currentItem : item,
+                  )
+                : [
+                    currentItem,
+                    ...savedQueue.filter(
+                      (item) =>
+                        item.track.external_id !==
+                        currentItem.track.external_id,
+                    ),
+                  ]
+              : savedQueue;
+            const restoredIndex = currentItem
+              ? savedCurrentIndex >= 0
+                ? savedCurrentIndex
+                : 0
+              : clampIndex(0, restoredQueue.length);
+            const restoredQueueContextId = createQueueContextId();
+            set((state) => ({
+              shuffleEnabled: false,
+              queue:
+                restoredQueue.length > 0
+                  ? restoredQueue
+                  : state.queue,
+              currentIndex:
+                restoredQueue.length > 0
+                  ? restoredIndex
+                  : state.currentIndex,
+              history: [],
+              shuffleCursor: null,
+              shuffleExcludedExternalID: null,
+              shuffleCycleComplete: false,
+              shuffleCycleHasTracks: false,
+              shuffleLoading: false,
+              shuffleRequestId: state.shuffleRequestId + 1,
+              queueContextId: restoredQueueContextId,
+              pendingAdvanceQueueContextId: null,
+              preShuffleQueue: [],
+              preShuffleContinuation: null,
+            }));
+            if (savedContinuation && restoredQueue.length > 0) {
+              startQueueContinuation({
+                ...savedContinuation,
+                queueContextId: restoredQueueContextId,
+              });
+            }
+            return;
+          }
+
+          const currentItem = selectCurrentItem(snapshot);
+          const continuation = useQueueContinuationStore.getState();
+          const compacted = compactConsumedQueue(
+            snapshot.queue,
+            snapshot.currentIndex,
+            snapshot.history,
+          );
+          const savedContinuation =
+            continuation.source &&
+            continuation.source.kind !== "shuffle" &&
+            continuation.queueContextId === snapshot.queueContextId
+              ? {
+                  source: continuation.source,
+                  cursor: continuation.cursor,
+                  page: continuation.page,
+                  hasMore: continuation.hasMore,
+                }
+              : null;
+          stopQueueContinuation();
+          set((state) => ({
+            shuffleEnabled: true,
+            queue: currentItem ? [currentItem] : [],
+            currentIndex: currentItem ? 0 : -1,
+            history: [],
+            shuffleCursor: null,
+            shuffleExcludedExternalID:
+              currentItem?.track.external_id ?? null,
+            shuffleCycleComplete: false,
+            shuffleCycleHasTracks: false,
+            shuffleLoading: false,
+            shuffleRequestId: state.shuffleRequestId + 1,
+            queueContextId: createQueueContextId(),
+            pendingAdvanceQueueContextId: null,
+            preShuffleQueue: compacted.queue,
+            preShuffleContinuation: savedContinuation,
+            error: null,
+          }));
+          if (currentItem) void get().prefetchShuffle();
+        },
+        prefetchShuffle: async () => {
+          if (shuffleRequestPromise) return shuffleRequestPromise;
+
+          const snapshot = get();
+          const currentItem = selectCurrentItem(snapshot);
+          if (
+            !snapshot.shuffleEnabled ||
+            !currentItem ||
+            snapshot.shuffleCycleComplete
+          ) {
+            return false;
+          }
+
+          const excluded =
+            snapshot.shuffleExcludedExternalID ??
+            currentItem.track.external_id;
+          const requestId = snapshot.shuffleRequestId + 1;
+          set({
+            shuffleLoading: true,
+            shuffleRequestId: requestId,
+            shuffleExcludedExternalID: excluded,
+            error: null,
+          });
+
+          const request = (async () => {
+            try {
+              const response = await api.shuffleWithCursor(
+                1,
+                snapshot.shuffleCursor,
+                excluded,
+              );
+              const latest = get();
+              if (
+                !latest.shuffleEnabled ||
+                latest.shuffleRequestId !== requestId ||
+                latest.shuffleExcludedExternalID !== excluded
+              ) {
+                return false;
+              }
+
+              const existing = new Set(
+                latest.queue.map((item) => item.track.external_id),
+              );
+              const incoming = (response.results ?? [])
+                .filter((track) => {
+                  if (existing.has(track.external_id)) return false;
+                  existing.add(track.external_id);
+                  return true;
+                })
+                .map(createQueueItem);
+
+              const compacted = compactConsumedQueue(
+                latest.queue,
+                latest.currentIndex,
+                latest.history,
+              );
+
+              const nextCursor = response.next_cursor ?? null;
+              const cycleComplete =
+                response.cycle_complete ||
+                response.has_next === false ||
+                !nextCursor;
+              const nextState: Partial<PlayerState> = {
+                queue: [...compacted.queue, ...incoming],
+                currentIndex: compacted.currentIndex,
+                history: compacted.history,
+                shuffleCursor: nextCursor,
+                shuffleCycleComplete: cycleComplete,
+                shuffleCycleHasTracks:
+                  latest.shuffleCycleHasTracks || incoming.length > 0,
+                shuffleLoading: false,
+                error: null,
+              };
+              const shouldAdvance =
+                latest.pendingAdvanceQueueContextId ===
+                  latest.queueContextId &&
+                compacted.currentIndex === compacted.queue.length - 1 &&
+                incoming.length > 0;
+              if (shouldAdvance) {
+                resetShuffleRetry();
+                set({
+                  ...nextState,
+                  ...moveToIndex(
+                    { ...latest, ...nextState } as PlayerState,
+                    compacted.currentIndex + 1,
+                    true,
+                    [...compacted.history, compacted.currentIndex],
+                  ),
+                });
+              } else {
+                set(nextState);
+                if (
+                  latest.pendingAdvanceQueueContextId ===
+                  latest.queueContextId
+                ) {
+                  if (cycleComplete) {
+                    resetShuffleRetry();
+                    get().cancelPendingAdvance(latest.queueContextId);
+                  } else {
+                    scheduleShuffleRetry(latest.queueContextId);
+                  }
+                } else {
+                  resetShuffleRetry();
+                }
+              }
+              return incoming.length > 0;
+            } catch (reason) {
+              const latest = get();
+              if (latest.shuffleRequestId === requestId) {
+                const message =
+                  reason instanceof Error
+                    ? reason.message
+                    : "Could not continue shuffle";
+                const retryable =
+                  isRetryableShuffleContinuationError(reason);
+                set({
+                  shuffleLoading: false,
+                  error: message,
+                });
+                if (
+                  latest.pendingAdvanceQueueContextId ===
+                  latest.queueContextId
+                ) {
+                  if (retryable) {
+                    scheduleShuffleRetry(latest.queueContextId);
+                  } else {
+                    resetShuffleRetry();
+                    get().cancelPendingAdvance(latest.queueContextId, message);
+                  }
+                }
+              }
+              return false;
+            }
+          })();
+
+          shuffleRequestPromise = request;
+          void request.finally(() => {
+            if (shuffleRequestPromise === request) {
+              shuffleRequestPromise = null;
+            }
+          });
+          return request;
+        },
+        cancelPendingAdvance: (expectedQueueContextId, error = null) => {
+          resetShuffleRetry();
+          set((state) =>
+            state.pendingAdvanceQueueContextId === expectedQueueContextId
+              ? {
+                  pendingAdvanceQueueContextId: null,
+                  isPlaying: false,
+                  status: "paused",
+                  currentTime: state.duration,
+                  error,
+                }
+              : {},
+          );
+        },
         seek: (seconds) => set({ seekTarget: Math.max(seconds, 0) }),
         clearSeekRequest: () => set({ seekTarget: null }),
         beginRetryCurrentTrack: () => {
@@ -714,31 +1372,30 @@ export function createPlayerStore(
             duration: Number.isFinite(duration) ? duration : 0,
             bufferedTo: Number.isFinite(bufferedTo) ? bufferedTo : 0,
           }),
-        handleTrackEnded: () =>
-          set((state) => {
-            const nextIndex = computeEndedNextIndex(state);
-            if (nextIndex === null) {
-              return {
-                isPlaying: false,
-                status: "paused",
-                currentTime: state.duration,
-              };
+        handleTrackEnded: () => {
+          const endedQueueContextId = get().queueContextId;
+          const endedQueueId = selectCurrentItem(get())?.queueId;
+          void get().next().then((advanced) => {
+            if (!advanced) {
+              set((state) =>
+                state.queueContextId === endedQueueContextId &&
+                selectCurrentItem(state)?.queueId === endedQueueId
+                  ? {
+                      isPlaying: false,
+                      status: "paused",
+                      currentTime: state.duration,
+                    }
+                  : {},
+              );
             }
-
-            if (nextIndex === state.currentIndex) {
-              return moveToIndex(state, nextIndex, true, state.history);
-            }
-
-            const history = state.shuffleEnabled
-              ? [...state.history, state.currentIndex]
-              : state.history;
-            return moveToIndex(state, nextIndex, true, history);
-          }),
+          });
+        },
         handlePlaybackError: (message) =>
           set((state) => ({
             status: "error",
             isPlaying: false,
             error: message,
+            pendingAdvanceQueueContextId: null,
             queue: state.queue.map((item, index) =>
               index === state.currentIndex
                 ? {
@@ -751,8 +1408,8 @@ export function createPlayerStore(
           })),
         setLikedExternalIDs: (likedExternalIDs) => set({ likedExternalIDs }),
         loadLikes: async () => {
-          const token = get().token;
-          if (!token) {
+          const { token, user } = get();
+          if (!user) {
             set({ likedExternalIDs: [] });
             return;
           }
@@ -769,8 +1426,8 @@ export function createPlayerStore(
           }
         },
         toggleLike: async (track) => {
-          const token = get().token;
-          if (!token) {
+          const { token, user } = get();
+          if (!user) {
             throw new Error("Sign in from your profile to save tracks");
           }
 
@@ -816,34 +1473,73 @@ export function createPlayerStore(
       {
         name: storageKey,
         storage: createJSONStorage(() => resolveStorage(storage)),
-        partialize: (state): PersistedPlayerState => ({
-          token: state.token,
-          user: state.user,
-          sessionExpiresAt: state.sessionExpiresAt,
-          volume: state.volume,
-          muted: state.muted,
-          repeatMode: state.repeatMode,
-          shuffleEnabled: state.shuffleEnabled,
-          queue: state.queue.map((item) => ({
-            queueId: item.queueId,
-            track: {
-              ...item.track,
-              stream_url: undefined,
-            },
-          })),
-          currentIndex: state.currentIndex,
-        }),
+        partialize: (state): PersistedPlayerState => {
+          const compacted = compactQueueForPersistence(
+            state.queue,
+            state.currentIndex,
+            state.history,
+          );
+          const persistItems = (items: QueueItem[]) =>
+            items.map((item) => ({
+              queueId: item.queueId,
+              track: {
+                ...item.track,
+                stream_url: undefined,
+              },
+            }));
+          const preShufflePersistLimit =
+            QUEUE_HISTORY_LIMIT + 1 + QUEUE_FUTURE_PERSIST_LIMIT;
+          const preShuffleQueueTruncated =
+            state.preShuffleQueue.length > preShufflePersistLimit;
+          return {
+            token: state.token,
+            user: state.user,
+            sessionExpiresAt: state.sessionExpiresAt,
+            volume: state.volume,
+            muted: state.muted,
+            shuffleEnabled: state.shuffleEnabled,
+            shuffleStateVersion: SHUFFLE_STATE_VERSION,
+            shuffleCursor: state.shuffleCursor,
+            shuffleExcludedExternalID: state.shuffleExcludedExternalID,
+            shuffleCycleComplete: state.shuffleCycleComplete,
+            shuffleCycleHasTracks: state.shuffleCycleHasTracks,
+            queueContextId: state.queueContextId,
+            queueTruncated: compacted.truncated,
+            preShuffleQueue: persistItems(
+              state.preShuffleQueue.slice(0, preShufflePersistLimit),
+            ),
+            preShuffleContinuation: preShuffleQueueTruncated
+              ? null
+              : state.preShuffleContinuation,
+            queue: persistItems(compacted.queue),
+            currentIndex: compacted.currentIndex,
+            currentTime: state.currentTime,
+          };
+        },
         merge: (persistedState, currentState) => {
           const persisted = persistedState as Partial<PersistedPlayerState>;
           const queue = sanitizePersistedQueue(persisted.queue);
+          const preShuffleQueue = sanitizePersistedQueue(
+            persisted.preShuffleQueue,
+          );
           const currentIndex = clampIndex(
             persisted.currentIndex ?? -1,
             queue.length,
           );
+          const shuffleEnabled = persisted.shuffleEnabled === true;
+          const hasPersistedShuffleCycle =
+            persisted.shuffleStateVersion === SHUFFLE_STATE_VERSION;
+          const legacyShuffleItem =
+            shuffleEnabled && !hasPersistedShuffleCycle && currentIndex >= 0
+              ? queue[currentIndex]
+              : null;
+          const hydratedQueue = legacyShuffleItem
+            ? [legacyShuffleItem]
+            : queue;
+          const hydratedIndex = legacyShuffleItem ? 0 : currentIndex;
           const sessionExpiresAt =
             persisted.sessionExpiresAt ?? currentState.sessionExpiresAt;
           const hasValidSession =
-            !!persisted.token &&
             !!persisted.user &&
             !isSessionExpired(sessionExpiresAt);
 
@@ -853,26 +1549,63 @@ export function createPlayerStore(
               ? (persisted.token ?? currentState.token)
               : null,
             user: hasValidSession
-              ? (persisted.user ?? currentState.user)
+              ? normalizeUser(persisted.user ?? currentState.user!)
               : null,
             sessionExpiresAt: hasValidSession ? sessionExpiresAt : null,
             volume: persisted.volume ?? currentState.volume,
             muted: persisted.muted ?? currentState.muted,
-            repeatMode: persisted.repeatMode ?? currentState.repeatMode,
-            shuffleEnabled:
-              persisted.shuffleEnabled ?? currentState.shuffleEnabled,
-            queue: queue.length > 0 ? queue : currentState.queue,
-            currentIndex,
+            shuffleEnabled,
+            shuffleCursor:
+              shuffleEnabled && hasPersistedShuffleCycle &&
+              typeof persisted.shuffleCursor === "string"
+                ? persisted.shuffleCursor
+                : null,
+            shuffleExcludedExternalID: shuffleEnabled
+              ? typeof persisted.shuffleExcludedExternalID === "string"
+                ? persisted.shuffleExcludedExternalID
+                : hydratedQueue[hydratedIndex]?.track.external_id ?? null
+              : null,
+            shuffleCycleComplete:
+              shuffleEnabled &&
+              hasPersistedShuffleCycle &&
+              persisted.shuffleCycleComplete === true,
+            shuffleCycleHasTracks:
+              shuffleEnabled &&
+              hasPersistedShuffleCycle &&
+              persisted.shuffleCycleHasTracks === true,
+            shuffleLoading: false,
+            shuffleRequestId: 0,
+            queueContextId:
+              typeof persisted.queueContextId === "string" &&
+              persisted.queueContextId !== "" &&
+              persisted.queueTruncated !== true
+                ? persisted.queueContextId
+                : createQueueContextId(),
+            pendingAdvanceQueueContextId: null,
+            preShuffleQueue: shuffleEnabled ? preShuffleQueue : [],
+            preShuffleContinuation: shuffleEnabled
+              ? sanitizeSavedQueueContinuation(
+                  persisted.preShuffleContinuation,
+                )
+              : null,
+            queue:
+              hydratedQueue.length > 0
+                ? hydratedQueue
+                : currentState.queue,
+            currentIndex: hydratedIndex,
             history: [],
-            status: currentIndex >= 0 ? "paused" : "idle",
+            status: hydratedIndex >= 0 ? "paused" : "idle",
             isPlaying: false,
-            currentTime: 0,
+            currentTime: persisted.currentTime ?? 0,
             duration:
-              (queue.length > 0
-                ? queue[currentIndex]?.track?.duration_seconds
+              (hydratedQueue.length > 0
+                ? hydratedQueue[hydratedIndex]?.track?.duration_seconds
                 : undefined) ?? 0,
             bufferedTo: 0,
-            seekTarget: null,
+            seekTarget:
+              hydratedIndex >= 0 && (persisted.currentTime ?? 0) > 0
+                ? (persisted.currentTime ?? 0)
+                : null,
             error: null,
             activeRequestId: 0,
           };
@@ -880,6 +1613,35 @@ export function createPlayerStore(
       },
     ),
   );
+  getStoreState = store.getState;
+  return store;
 }
 
+function migrateLegacyPlayerStorage() {
+  if (typeof window === "undefined") return;
+  try {
+    if (
+      !window.localStorage.getItem(DEFAULT_PLAYER_STORAGE_KEY) &&
+      window.localStorage.getItem(LEGACY_PLAYER_STORAGE_KEY)
+    ) {
+      window.localStorage.setItem(
+        DEFAULT_PLAYER_STORAGE_KEY,
+        window.localStorage.getItem(LEGACY_PLAYER_STORAGE_KEY)!,
+      );
+    }
+  } catch {
+    // Storage can be unavailable in private browsing; the player still works in memory.
+  }
+}
+
+export function removeLegacyPlayerStorage() {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(LEGACY_PLAYER_STORAGE_KEY);
+  } catch {
+    // Ignore unavailable storage.
+  }
+}
+
+migrateLegacyPlayerStorage();
 export const usePlayerStore = createPlayerStore();

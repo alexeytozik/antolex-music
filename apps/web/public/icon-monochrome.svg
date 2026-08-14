@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">ANTOLEX Music monochrome mark</title>
+  <desc id="desc">One-color geometric letter A crossed by an audio waveform</desc>
+  <defs>
+    <mask id="mark">
+      <rect width="512" height="512" fill="#000000"/>
+      <path d="M126 397 237 126c7-18 32-18 40 0l113 271" fill="none" stroke="#FFFFFF" stroke-width="50" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="135" y="221" width="242" height="94" rx="47" fill="#000000"/>
+      <g fill="#FFFFFF">
+        <rect x="160" y="248" width="18" height="40" rx="9"/>
+        <rect x="194" y="232" width="18" height="72" rx="9"/>
+        <rect x="228" y="210" width="18" height="116" rx="9"/>
+        <rect x="262" y="226" width="18" height="84" rx="9"/>
+        <rect x="296" y="239" width="18" height="58" rx="9"/>
+        <rect x="330" y="250" width="18" height="36" rx="9"/>
+      </g>
+    </mask>
+  </defs>
+  <rect width="512" height="512" fill="#FFFFFF" mask="url(#mark)"/>
+</svg>

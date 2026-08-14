@@ -13,3 +13,9 @@ bin
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
+.backups/
+backups/
+reports/
+migration-reports/
+*.dump
+*.sql.gz

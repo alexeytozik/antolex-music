@@ -16,6 +16,7 @@ import (
 type audioMetadata struct {
 	Title           string
 	Artist          string
+	Album           string
 	DurationSeconds int
 }
 
@@ -24,6 +25,15 @@ type ffprobeOutput struct {
 		Duration string            `json:"duration"`
 		Tags     map[string]string `json:"tags"`
 	} `json:"format"`
+}
+
+type ffprobeArtworkOutput struct {
+	Streams []struct {
+		Index       int `json:"index"`
+		Disposition struct {
+			AttachedPic int `json:"attached_pic"`
+		} `json:"disposition"`
+	} `json:"streams"`
 }
 
 func extractAudioMetadataFromFile(ctx context.Context, filePath string) (audioMetadata, error) {
@@ -35,7 +45,7 @@ func extractAudioMetadataFromFile(ctx context.Context, filePath string) (audioMe
 		ctx,
 		"ffprobe",
 		"-v", "error",
-		"-show_entries", "format=duration:format_tags=title,artist,album_artist,ARTIST,TITLE",
+		"-show_entries", "format=duration:format_tags=title,artist,album,album_artist,ARTIST,TITLE,ALBUM",
 		"-of", "json",
 		filePath,
 	)
@@ -53,6 +63,7 @@ func extractAudioMetadataFromFile(ctx context.Context, filePath string) (audioMe
 	metadata := audioMetadata{
 		Title:  firstNonEmptyTag(probe.Format.Tags, "title", "TITLE"),
 		Artist: firstNonEmptyTag(probe.Format.Tags, "artist", "album_artist", "ARTIST"),
+		Album:  firstNonEmptyTag(probe.Format.Tags, "album", "ALBUM"),
 	}
 
 	if seconds, err := strconvDuration(probe.Format.Duration); err == nil {
@@ -62,17 +73,74 @@ func extractAudioMetadataFromFile(ctx context.Context, filePath string) (audioMe
 	return metadata, nil
 }
 
+func probeAudioFileStrict(ctx context.Context, filePath string) (audioMetadata, error) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		return audioMetadata{}, fmt.Errorf("ffprobe is not installed")
+	}
+	cmd := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration:format_tags=title,artist,album,album_artist,ARTIST,TITLE,ALBUM", "-of", "json", filePath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return audioMetadata{}, fmt.Errorf("invalid audio file: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	var probe ffprobeOutput
+	if err := json.Unmarshal(output, &probe); err != nil {
+		return audioMetadata{}, fmt.Errorf("decode ffprobe output: %w", err)
+	}
+	seconds, err := strconvDuration(probe.Format.Duration)
+	if err != nil {
+		return audioMetadata{}, fmt.Errorf("audio duration is missing or invalid")
+	}
+	return audioMetadata{
+		Title:           firstNonEmptyTag(probe.Format.Tags, "title", "TITLE"),
+		Artist:          firstNonEmptyTag(probe.Format.Tags, "artist", "album_artist", "ARTIST"),
+		Album:           firstNonEmptyTag(probe.Format.Tags, "album", "ALBUM"),
+		DurationSeconds: seconds,
+	}, nil
+}
+
 func extractAudioArtworkFromFile(ctx context.Context, filePath string) (string, string, error) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		return "", "", fmt.Errorf("locate ffprobe: %w", err)
+	}
+	probeCmd := exec.CommandContext(
+		ctx,
+		"ffprobe",
+		"-v", "error",
+		"-show_entries", "stream=index:stream_disposition=attached_pic",
+		"-of", "json",
+		filePath,
+	)
+	probeOutput, err := probeCmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("probe embedded artwork: %w: %s", err, strings.TrimSpace(string(probeOutput)))
+	}
+	streamIndex, found, err := findAttachedArtworkStream(probeOutput)
+	if err != nil {
+		return "", "", fmt.Errorf("decode embedded artwork probe: %w", err)
+	}
+	if !found {
 		return "", "", nil
 	}
 
-	tempFile, err := os.CreateTemp("", "tozikron-cover-*.jpg")
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return "", "", fmt.Errorf("locate ffmpeg: %w", err)
+	}
+
+	tempFile, err := os.CreateTemp("", "antolex-cover-*.jpg")
 	if err != nil {
-		return "", "", nil
+		return "", "", fmt.Errorf("create temporary artwork file: %w", err)
 	}
 	tempPath := tempFile.Name()
-	_ = tempFile.Close()
+	if err := tempFile.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return "", "", fmt.Errorf("close temporary artwork file: %w", err)
+	}
+	keepTempFile := false
+	defer func() {
+		if !keepTempFile {
+			_ = os.Remove(tempPath)
+		}
+	}()
 
 	cmd := exec.CommandContext(
 		ctx,
@@ -80,23 +148,42 @@ func extractAudioArtworkFromFile(ctx context.Context, filePath string) (string, 
 		"-v", "error",
 		"-y",
 		"-i", filePath,
-		"-map", "0:v:0",
+		"-map", fmt.Sprintf("0:%d", streamIndex),
 		"-frames:v", "1",
 		tempPath,
 	)
 
-	if _, err := cmd.Output(); err != nil {
-		_ = os.Remove(tempPath)
-		return "", "", nil
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("extract embedded artwork stream %d: %w: %s", streamIndex, err, strings.TrimSpace(string(output)))
 	}
 
 	info, err := os.Stat(tempPath)
-	if err != nil || info.Size() == 0 {
-		_ = os.Remove(tempPath)
-		return "", "", nil
+	if err != nil {
+		return "", "", fmt.Errorf("inspect extracted artwork: %w", err)
+	}
+	if info.Size() == 0 {
+		return "", "", fmt.Errorf("extracted artwork is empty")
 	}
 
+	keepTempFile = true
 	return tempPath, "image/jpeg", nil
+}
+
+func findAttachedArtworkStream(output []byte) (int, bool, error) {
+	var probe ffprobeArtworkOutput
+	if err := json.Unmarshal(output, &probe); err != nil {
+		return 0, false, err
+	}
+	for _, stream := range probe.Streams {
+		if stream.Disposition.AttachedPic != 0 {
+			if stream.Index < 0 {
+				return 0, false, fmt.Errorf("invalid attached artwork stream index %d", stream.Index)
+			}
+			return stream.Index, true, nil
+		}
+	}
+	return 0, false, nil
 }
 
 func deriveTrackMetadata(
@@ -139,7 +226,7 @@ func deriveTrackMetadata(
 
 func writeReaderToTempAudioFile(reader io.Reader, sourceName string) (string, int64, error) {
 	ext := strings.ToLower(path.Ext(sourceName))
-	tempFile, err := os.CreateTemp("", "tozikron-audio-*"+ext)
+	tempFile, err := os.CreateTemp("", "antolex-audio-*"+ext)
 	if err != nil {
 		return "", 0, fmt.Errorf("create temp file: %w", err)
 	}

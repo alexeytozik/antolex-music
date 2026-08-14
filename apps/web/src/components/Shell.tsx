@@ -1,58 +1,90 @@
-import { NavLink, Outlet } from 'react-router-dom';
+import { useState } from "react";
+import { Link, NavLink, Outlet } from "react-router-dom";
 
-import { HeartIcon, SearchIcon, UserIcon } from './Icons';
-import { Player } from './Player';
-import { usePlayerStore } from '../store/player-store';
-
-const links = [
-  { to: '/', label: 'Search', icon: SearchIcon },
-  { to: '/liked', label: 'Liked Songs', icon: HeartIcon },
-  { to: '/profile', label: 'Profile', icon: UserIcon },
-];
+import { HeartIcon, LogOutIcon, PlusIcon, SearchIcon, UserIcon } from "./Icons";
+import { Player } from "./Player";
+import { api } from "../lib/api";
+import { selectCurrentItem, usePlayerStore } from "../store/player-store";
 
 export function Shell() {
   const user = usePlayerStore((state) => state.user);
+  const clearSession = usePlayerStore((state) => state.clearSession);
+  const currentItem = usePlayerStore(selectCurrentItem);
+  const [signingOut, setSigningOut] = useState(false);
+  const links = [
+    { to: "/", label: "Search", icon: SearchIcon, end: true },
+    { to: "/liked", label: "Liked", icon: HeartIcon },
+    { to: "/add", label: "Add", icon: PlusIcon },
+  ];
+
+  async function signOut() {
+    if (signingOut) return;
+    setSigningOut(true);
+    try {
+      await api.logout();
+    } catch {
+      // The local session must still be cleared when the cookie already expired.
+    } finally {
+      clearSession();
+      setSigningOut(false);
+    }
+  }
 
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="border-b border-white/10 bg-zinc-950/80 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
-          <div className="flex items-center gap-2.5">
-            <img src="/favicon.svg" alt="" className="h-11 w-11 rounded-2xl" />
-            <p className="text-sm font-semibold tracking-[0.18em] text-zinc-50 uppercase">
-              Tozikron
-            </p>
+    <div className={`app-shell ${user ? "authenticated" : ""} ${user && currentItem ? "has-player" : ""}`}>
+      <header className="top-bar">
+        <div className="top-bar-inner">
+          <div className="brand-lockup mobile-brand">
+            <img src="/favicon.svg" alt="" />
+            <div><strong>ANTOLEX</strong><span>Music</span></div>
           </div>
-          <div className="max-w-[40vw] truncate text-right text-xs text-zinc-500">
-            {user ? user.email : 'Guest'}
+          <img className="desktop-brand" src="/logo-wordmark.svg" alt="ANTOLEX Music" />
+          {user && (
+            <nav className="desktop-nav" aria-label="Main navigation">
+              {links.map((link) => (
+                <NavLink key={link.to} to={link.to} end={link.end} className={({ isActive }) => isActive ? "active" : undefined} aria-label={link.label} title={link.label}>
+                  <link.icon className="h-6 w-6" />
+                </NavLink>
+              ))}
+            </nav>
+          )}
+          <div className="account-control">
+            {user ? (
+              <button
+                className="account-auth signed-in"
+                type="button"
+                onClick={() => void signOut()}
+                disabled={signingOut}
+                aria-busy={signingOut}
+                aria-label={signingOut ? "Signing out" : `Signed in as ${user.email}. Sign out`}
+                title={signingOut ? "Signing out" : `${user.email} · Sign out`}
+              >
+                <LogOutIcon className="h-5 w-5" />
+                <span>{signingOut ? "Signing out" : "Sign out"}</span>
+              </button>
+            ) : (
+              <Link className="account-auth" to="/profile" aria-label="Sign in" title="Sign in">
+                <UserIcon className="h-5 w-5" />
+                <span>Sign in</span>
+              </Link>
+            )}
           </div>
         </div>
-        <nav className="mx-auto flex max-w-6xl gap-1.5 px-4 pb-3">
+      </header>
+
+      <main className="app-main"><Outlet /></main>
+      {user && <Player />}
+
+      {user && (
+        <nav className="bottom-nav" aria-label="Main navigation">
           {links.map((link) => (
-            <NavLink
-              key={link.to}
-              to={link.to}
-              className={({ isActive }) =>
-                `flex h-11 w-11 items-center justify-center rounded-full text-sm transition ${
-                  isActive
-                    ? 'bg-white text-zinc-950'
-                    : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-50'
-                }`
-              }
-              aria-label={link.label}
-              title={link.label}
-            >
-              <link.icon className="h-[1.35rem] w-[1.35rem]" />
+            <NavLink key={link.to} to={link.to} end={link.end} className={({ isActive }) => isActive ? "active" : undefined}>
+              <link.icon className="h-6 w-6" />
+              <span>{link.label}</span>
             </NavLink>
           ))}
         </nav>
-      </header>
-
-      <main className="mx-auto flex w-full max-w-6xl flex-1 px-4 py-8">
-        <Outlet />
-      </main>
-
-      <Player />
+      )}
     </div>
   );
 }

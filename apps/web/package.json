@@ -1,5 +1,5 @@
 {
-  "name": "tozikron-web",
+  "name": "antolex-music-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -10,20 +10,22 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@fontsource-variable/manrope": "^5.2.8",
+    "@noble/hashes": "^1.8.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-router-dom": "^7.8.2",
     "zustand": "^5.0.7"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.1.12",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
     "@vitejs/plugin-react": "^5.0.0",
-    "@tailwindcss/vite": "^4.1.12",
     "jsdom": "^26.1.0",
     "tailwindcss": "^4.1.12",
     "typescript": "~5.8.3",
     "vite": "^7.1.2",
-    "vitest": "^2.1.9"
+    "vitest": "^4.1.10"
   }
 }

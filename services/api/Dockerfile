@@ -6,14 +6,16 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/tozikron-api ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/antolex-api ./cmd/api && \
+    CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/antolex-worker ./cmd/worker
 
 FROM alpine:3.22
 
 RUN apk add --no-cache ca-certificates wget ffmpeg
 
-COPY --from=build /usr/local/bin/tozikron-api /usr/local/bin/tozikron-api
+COPY --from=build /usr/local/bin/antolex-api /usr/local/bin/antolex-api
+COPY --from=build /usr/local/bin/antolex-worker /usr/local/bin/antolex-worker
 
 EXPOSE 8080
 
-CMD ["tozikron-api"]
+CMD ["antolex-api"]

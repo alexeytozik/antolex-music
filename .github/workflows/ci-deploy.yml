@@ -1,0 +1,347 @@
+name: CI and production deploy
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: antolex-music-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  frontend:
+    name: Frontend tests and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
+  backend:
+    name: Backend tests and vet
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: music_test
+          POSTGRES_USER: music_test
+          POSTGRES_PASSWORD: music_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U music_test -d music_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://music_test:music_test@127.0.0.1:5432/music_test?sslmode=disable
+    defaults:
+      run:
+        working-directory: services/api
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: services/api/go.mod
+          cache-dependency-path: services/api/go.sum
+
+      - name: Install media tools
+        run: sudo apt-get update && sudo apt-get install --yes ffmpeg
+
+      - name: Run tests
+        run: go test -race -count=1 ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+  compose:
+    name: Validate production images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate production configuration
+        run: docker compose --profile production config --quiet
+
+      - name: Validate operational scripts
+        run: bash -n scripts/*.sh
+
+      - name: Build production images
+        run: docker compose --profile production build api worker web
+
+      - name: Validate Caddy configuration
+        run: >-
+          docker run --rm
+          --env ANTOLEX_DOMAIN=music.antolex.net
+          --volume "${PWD}/Caddyfile:/etc/caddy/Caddyfile:ro"
+          caddy:2.10-alpine
+          caddy validate --config /etc/caddy/Caddyfile
+
+  deploy:
+    name: Deploy production
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs:
+      - frontend
+      - backend
+      - compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: antolex-music-production
+      cancel-in-progress: false
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Create immutable release archive
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_id="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          archive="antolex-music-${release_id}.tar.gz"
+          git archive --format=tar.gz --output="${archive}" "${GITHUB_SHA}"
+          sha256sum "${archive}" > "${archive}.sha256"
+          printf 'release_id=%s\n' "${release_id}" >> "${GITHUB_OUTPUT}"
+          printf 'archive=%s\n' "${archive}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload and activate release
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          RELEASE_ARCHIVE: ${{ steps.release.outputs.archive }}
+        run: |
+          set -euo pipefail
+          for variable in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            if [[ -z "${!variable:-}" ]]; then
+              printf '::error::Required secret %s is not configured.\n' "${variable}" >&2
+              exit 1
+            fi
+          done
+
+          install -d -m 700 "${HOME}/.ssh"
+          key_path="${HOME}/.ssh/antolex_deploy_key"
+          known_hosts_path="${HOME}/.ssh/known_hosts"
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > "${key_path}"
+          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" > "${known_hosts_path}"
+          chmod 600 "${key_path}" "${known_hosts_path}"
+          trap 'rm -f -- "${key_path}"' EXIT
+
+          if ! ssh-keygen -F "${DEPLOY_HOST}" -f "${known_hosts_path}" >/dev/null; then
+            printf '::error::DEPLOY_KNOWN_HOSTS has no verified key for DEPLOY_HOST.\n' >&2
+            exit 1
+          fi
+
+          ssh_options=(
+            -i "${key_path}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="${known_hosts_path}"
+            -o ConnectTimeout=15
+          )
+          remote="${DEPLOY_USER}@${DEPLOY_HOST}"
+          remote_root="/home/atozik/antolex-music"
+
+          ssh "${ssh_options[@]}" "${remote}" \
+            'install -d -m 755 /home/atozik/antolex-music/incoming /home/atozik/antolex-music/releases; install -d -m 700 /home/atozik/antolex-music/shared /home/atozik/antolex-music/shared/backups /home/atozik/antolex-music/shared/backups/postgres'
+          scp -q "${ssh_options[@]}" \
+            "${RELEASE_ARCHIVE}" "${RELEASE_ARCHIVE}.sha256" \
+            "${remote}:${remote_root}/incoming/"
+
+          ssh "${ssh_options[@]}" "${remote}" bash -s -- "${RELEASE_ID}" "${RELEASE_ARCHIVE}" <<'REMOTE_DEPLOY'
+          set -Eeuo pipefail
+          umask 077
+
+          release_id="$1"
+          archive_name="$2"
+          root="/home/atozik/antolex-music"
+          incoming_dir="${root}/incoming"
+          releases_dir="${root}/releases"
+          shared_env="${root}/shared/.env"
+          backup_dir="${root}/shared/backups/postgres"
+          release_dir="${releases_dir}/${release_id}"
+          archive_path="${incoming_dir}/${archive_name}"
+          checksum_path="${archive_path}.sha256"
+          current_link="${root}/current"
+          previous_release=""
+          deploy_started=0
+
+          if [[ ! "${release_id}" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]; then
+            printf 'Invalid release identifier.\n' >&2
+            exit 1
+          fi
+          if [[ "${archive_name}" != "antolex-music-${release_id}.tar.gz" ]]; then
+            printf 'Archive name does not match the release identifier.\n' >&2
+            exit 1
+          fi
+          if [[ ! -f "${shared_env}" ]]; then
+            printf 'Missing shared production environment: %s\n' "${shared_env}" >&2
+            exit 1
+          fi
+          if [[ "$(stat -c '%a' "${shared_env}")" != "600" ]]; then
+            printf 'Shared production environment must have mode 600.\n' >&2
+            exit 1
+          fi
+          if [[ -e "${current_link}" && ! -L "${current_link}" ]]; then
+            printf 'Refusing to replace a non-symlink current path.\n' >&2
+            exit 1
+          fi
+          if [[ -L "${current_link}" ]]; then
+            previous_release="$(readlink -f "${current_link}")"
+            if [[ ! -d "${previous_release}" ]]; then
+              printf 'Current release symlink is broken.\n' >&2
+              exit 1
+            fi
+          fi
+
+          cleanup_and_rollback() {
+            status=$?
+            trap - EXIT
+            rm -f -- "${archive_path}" "${checksum_path}"
+            if (( status != 0 && deploy_started == 1 )) && [[ -n "${previous_release}" ]]; then
+              printf 'Deployment failed; restoring the previous Compose release.\n' >&2
+              (
+                cd "${previous_release}"
+                sudo -n docker compose \
+                  --env-file "${shared_env}" \
+                  --project-directory "${previous_release}" \
+                  -f "${previous_release}/docker-compose.yml" \
+                  --profile production up -d --build --remove-orphans
+              ) || printf 'Automatic rollback failed; manual intervention is required.\n' >&2
+            fi
+            exit "${status}"
+          }
+          trap cleanup_and_rollback EXIT
+
+          command -v curl >/dev/null
+          command -v sha256sum >/dev/null
+          command -v tar >/dev/null
+          sudo -n docker compose version >/dev/null
+
+          cd "${incoming_dir}"
+          sha256sum --check "$(basename "${checksum_path}")"
+          if [[ -e "${release_dir}" ]]; then
+            printf 'Release directory already exists: %s\n' "${release_dir}" >&2
+            exit 1
+          fi
+          install -d -m 755 "${release_dir}"
+          tar --extract --gzip --file "${archive_path}" \
+            --directory "${release_dir}" --no-same-owner
+          ln -s "${shared_env}" "${release_dir}/.env"
+
+          compose=(
+            sudo -n docker compose
+            --env-file "${shared_env}"
+            --project-directory "${release_dir}"
+            -f "${release_dir}/docker-compose.yml"
+          )
+          "${compose[@]}" --profile production config --quiet
+
+          existing_services="$(sudo -n docker ps -a \
+            --filter 'label=com.docker.compose.project=antolex-music' \
+            --format '{{.Label "com.docker.compose.service"}}')"
+          if grep -Fxq postgres <<<"${existing_services}"; then
+            running_services="$(sudo -n docker ps \
+              --filter 'label=com.docker.compose.project=antolex-music' \
+              --format '{{.Label "com.docker.compose.service"}}')"
+            if ! grep -Fxq postgres <<<"${running_services}"; then
+              printf 'Existing PostgreSQL container is not running; refusing an unbacked deployment.\n' >&2
+              exit 1
+            fi
+            (
+              cd "${release_dir}"
+              sudo -n env -u DATABASE_URL \
+                ANTOLEX_BACKUP_DIR="${backup_dir}" \
+                ./scripts/backup-postgres.sh
+            )
+          fi
+
+          deploy_started=1
+          "${compose[@]}" --profile production up -d --build \
+            --remove-orphans --wait --wait-timeout 300
+
+          healthy=0
+          for _ in $(seq 1 60); do
+            if curl --fail --silent --show-error --max-time 5 \
+                http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1 \
+              && curl --fail --silent --show-error --max-time 5 \
+                http://127.0.0.1:5173/ >/dev/null 2>&1 \
+              && curl --fail --silent --show-error --max-time 5 \
+                --resolve music.antolex.net:443:127.0.0.1 \
+                https://music.antolex.net/api/v1/health >/dev/null 2>&1; then
+              healthy=1
+              break
+            fi
+            sleep 5
+          done
+          if (( healthy != 1 )); then
+            "${compose[@]}" --profile production ps >&2
+            printf 'Production health check did not pass within five minutes.\n' >&2
+            exit 1
+          fi
+
+          running_services="$("${compose[@]}" --profile production ps \
+            --status running --services)"
+          for required_service in postgres redis api worker web caddy; do
+            if ! grep -Fxq "${required_service}" <<<"${running_services}"; then
+              printf 'Required service is not running: %s\n' "${required_service}" >&2
+              "${compose[@]}" --profile production ps >&2
+              exit 1
+            fi
+          done
+
+          next_link="${root}/.current-${release_id}"
+          ln -s "${release_dir}" "${next_link}"
+          mv -Tf "${next_link}" "${current_link}"
+          deploy_started=0
+          printf 'Activated release %s\n' "${release_id}"
+          REMOTE_DEPLOY
+
+      - name: Verify public HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --retry 12 --retry-delay 5 --retry-all-errors --max-time 15 \
+            https://music.antolex.net/api/v1/health >/dev/null
+          curl --fail --silent --show-error \
+            --retry 12 --retry-delay 5 --retry-all-errors --max-time 15 \
+            https://music.antolex.net/ >/dev/null

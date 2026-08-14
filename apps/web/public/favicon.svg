@@ -1,24 +1,22 @@
-<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">ANTOLEX Music</title>
+  <desc id="desc">Geometric letter A crossed by an audio waveform</desc>
   <defs>
-    <linearGradient id="noteGradient" x1="96" y1="56" x2="164" y2="186" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#1DE9B6"/>
-      <stop offset="1" stop-color="#12D6C5"/>
+    <linearGradient id="mint" x1="112" y1="88" x2="398" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#71FFD2"/>
+      <stop offset="1" stop-color="#18CFA8"/>
     </linearGradient>
-    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
-      <feGaussianBlur stdDeviation="4" result="blur"/>
-      <feMerge>
-        <feMergeNode in="blur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
   </defs>
-
-  <!-- Background tile -->
-  <rect x="24" y="24" width="208" height="208" rx="32" fill="#0B0F14"/>
-  <rect x="24.75" y="24.75" width="206.5" height="206.5" rx="31.25" stroke="#FFFFFF" stroke-opacity="0.08"/>
-
-  <!-- Centered music note -->
-  <g filter="url(#softGlow)">
-    <path d="M158 58C158 55.7909 156.209 54 154 54C153.616 54 153.233 54.0553 152.864 54.1643L116.864 64.7893C113.475 65.7898 111.154 68.9005 111.154 72.4345V147.145C105.89 143.983 98.9755 142.925 91.9556 144.518C79.1755 147.418 69.9892 157.889 71.4394 167.904C72.8895 177.92 84.4267 183.691 97.2068 180.791C108.7 178.183 117.327 169.495 117.79 160.59L118 160.598V93.3167L150 83.8723V127.145C144.736 123.983 137.822 122.925 130.802 124.518C118.021 127.418 108.835 137.889 110.285 147.904C111.735 157.92 123.273 163.691 136.053 160.791C147.546 158.183 156.173 149.495 156.636 140.59L156.846 140.598V58H158Z" fill="url(#noteGradient)"/>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="#07100E"/>
+  <rect x="17" y="17" width="478" height="478" rx="111" fill="none" stroke="#DFFFF5" stroke-opacity=".12" stroke-width="2"/>
+  <path d="M126 397 237 126c7-18 32-18 40 0l113 271" fill="none" stroke="url(#mint)" stroke-width="50" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="135" y="221" width="242" height="94" rx="47" fill="#07100E"/>
+  <g fill="url(#mint)">
+    <rect x="160" y="248" width="18" height="40" rx="9"/>
+    <rect x="194" y="232" width="18" height="72" rx="9"/>
+    <rect x="228" y="210" width="18" height="116" rx="9"/>
+    <rect x="262" y="226" width="18" height="84" rx="9"/>
+    <rect x="296" y="239" width="18" height="58" rx="9"/>
+    <rect x="330" y="250" width="18" height="36" rx="9"/>
   </g>
 </svg>

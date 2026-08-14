@@ -4,319 +4,138 @@ import {
   type FormEvent,
   type KeyboardEvent,
   useEffect,
-  useMemo,
   useRef,
   useState,
-} from 'react';
-import { useNavigate } from 'react-router-dom';
+} from "react";
+import { Navigate, useNavigate } from "react-router-dom";
 
-import { LogOutIcon, MailIcon, UserIcon } from '../components/Icons';
-import { api } from '../lib/api';
-import { usePlayerStore } from '../store/player-store';
+import { MailIcon, SpinnerIcon, UserIcon } from "../components/Icons";
+import { api } from "../lib/api";
+import { usePlayerStore } from "../store/player-store";
 
 const OTP_LENGTH = 6;
+const RESEND_SECONDS = 60;
 
 export function ProfileView() {
   const navigate = useNavigate();
   const user = usePlayerStore((state) => state.user);
-  const sessionExpiresAt = usePlayerStore((state) => state.sessionExpiresAt);
   const setSession = usePlayerStore((state) => state.setSession);
-  const clearSession = usePlayerStore((state) => state.clearSession);
-
-  const [email, setEmail] = useState('');
-  const [code, setCode] = useState('');
-  const [step, setStep] = useState<'email' | 'code'>('email');
+  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [step, setStep] = useState<"email" | "code">("email");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [resendRemaining, setResendRemaining] = useState(0);
   const codeRefs = useRef<Array<HTMLInputElement | null>>([]);
 
-  const formattedExpiry = useMemo(() => {
-    if (!sessionExpiresAt) {
-      return null;
-    }
-
-    const date = new Date(sessionExpiresAt);
-    if (Number.isNaN(date.getTime())) {
-      return null;
-    }
-
-    return new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    }).format(date);
-  }, [sessionExpiresAt]);
-
-  const codeDigits = useMemo(
-    () => Array.from({ length: OTP_LENGTH }, (_, index) => code[index] ?? ''),
-    [code],
-  );
+  const codeDigits = Array.from({ length: OTP_LENGTH }, (_, index) => code[index] ?? "");
 
   useEffect(() => {
-    if (step !== 'code') {
-      return;
-    }
+    if (resendRemaining <= 0) return;
+    const timer = window.setInterval(() => {
+      setResendRemaining((value) => Math.max(0, value - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [resendRemaining]);
 
-    const focusIndex = Math.min(code.length, OTP_LENGTH - 1);
-    const frame = requestAnimationFrame(() => {
-      const input = codeRefs.current[focusIndex];
-      input?.focus();
-      input?.select();
-    });
-
+  useEffect(() => {
+    if (step !== "code") return;
+    const frame = requestAnimationFrame(() => codeRefs.current[Math.min(code.length, 5)]?.focus());
     return () => cancelAnimationFrame(frame);
   }, [code.length, step]);
 
-  function buildCodeDigits(value = code) {
-    return Array.from({ length: OTP_LENGTH }, (_, index) => value[index] ?? '');
+  function digits(value = code) {
+    return Array.from({ length: OTP_LENGTH }, (_, index) => value[index] ?? "");
   }
-
-  function focusCodeSlot(index: number) {
-    const input = codeRefs.current[index];
-    input?.focus();
-    input?.select();
+  function setDigits(next: string[], focus?: number) {
+    setCode(next.join("").slice(0, OTP_LENGTH));
+    if (typeof focus === "number") requestAnimationFrame(() => codeRefs.current[focus]?.focus());
   }
-
-  function setCodeDigits(nextDigits: string[], focusIndex?: number) {
-    const nextCode = nextDigits.join('').slice(0, OTP_LENGTH);
-    setCode(nextCode);
-
-    if (typeof focusIndex === 'number') {
-      requestAnimationFrame(() => {
-        focusCodeSlot(focusIndex);
-      });
-    }
-  }
-
-  function handleCodeSlotChange(index: number, event: ChangeEvent<HTMLInputElement>) {
-    const sanitized = event.target.value.replace(/\D/g, '');
-    const nextDigits = buildCodeDigits();
-
-    if (!sanitized) {
-      nextDigits[index] = '';
-      setCode(nextDigits.join(''));
+  function changeDigit(index: number, event: ChangeEvent<HTMLInputElement>) {
+    const values = digits();
+    const incoming = event.target.value.replace(/\D/g, "");
+    if (!incoming) {
+      values[index] = "";
+      setCode(values.join(""));
       return;
     }
-
-    let writeIndex = index;
-    for (const digit of sanitized) {
-      if (writeIndex >= OTP_LENGTH) {
-        break;
-      }
-      nextDigits[writeIndex] = digit;
-      writeIndex += 1;
+    let cursor = index;
+    for (const digit of incoming) {
+      if (cursor >= OTP_LENGTH) break;
+      values[cursor++] = digit;
     }
-
-    const focusIndex = Math.min(writeIndex, OTP_LENGTH - 1);
-    setCodeDigits(nextDigits, focusIndex);
+    setDigits(values, Math.min(cursor, OTP_LENGTH - 1));
   }
-
-  function handleCodeSlotKeyDown(index: number, event: KeyboardEvent<HTMLInputElement>) {
-    if (event.key === 'Backspace') {
+  function keyDown(index: number, event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Backspace") {
       event.preventDefault();
-
-      const nextDigits = buildCodeDigits();
-      if (nextDigits[index]) {
-        nextDigits[index] = '';
-        setCode(nextDigits.join(''));
-        return;
-      }
-
-      if (index > 0) {
-        nextDigits[index - 1] = '';
-        setCodeDigits(nextDigits, index - 1);
-      }
-      return;
-    }
-
-    if (event.key === 'ArrowLeft' && index > 0) {
-      event.preventDefault();
-      focusCodeSlot(index - 1);
-      return;
-    }
-
-    if (event.key === 'ArrowRight' && index < OTP_LENGTH - 1) {
-      event.preventDefault();
-      focusCodeSlot(index + 1);
+      const values = digits();
+      const target = values[index] ? index : Math.max(0, index - 1);
+      values[target] = "";
+      setDigits(values, target);
+    } else if (event.key === "ArrowLeft" && index > 0) {
+      event.preventDefault(); codeRefs.current[index - 1]?.focus();
+    } else if (event.key === "ArrowRight" && index < 5) {
+      event.preventDefault(); codeRefs.current[index + 1]?.focus();
     }
   }
-
-  function handleCodePaste(event: ClipboardEvent<HTMLInputElement>) {
-    const pasted = event.clipboardData.getData('text').replace(/\D/g, '').slice(0, OTP_LENGTH);
-    if (!pasted) {
-      return;
-    }
-
+  function paste(event: ClipboardEvent<HTMLInputElement>) {
+    const value = event.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6);
+    if (!value) return;
     event.preventDefault();
-
-    const nextDigits = Array.from({ length: OTP_LENGTH }, (_, index) => pasted[index] ?? '');
-    setCodeDigits(nextDigits, Math.min(pasted.length, OTP_LENGTH) - 1);
+    setDigits(Array.from({ length: 6 }, (_, index) => value[index] ?? ""), Math.min(value.length, 6) - 1);
   }
 
-  async function handleRequestCode(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    setMessage(null);
-
+  async function requestCode() {
+    setBusy(true); setError(null); setMessage(null);
     try {
-      await api.requestCode({ email });
-      setStep('code');
-      setMessage('Code sent.');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to send sign-in code');
-    } finally {
-      setBusy(false);
-    }
+      await api.requestCode({ email: email.trim() });
+      setStep("code");
+      setMessage("Code sent. Check your inbox.");
+      setResendRemaining(RESEND_SECONDS);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not send code");
+    } finally { setBusy(false); }
   }
-
-  async function handleVerifyCode(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setBusy(true);
-    setError(null);
-    setMessage(null);
-
+    if (step === "email") { await requestCode(); return; }
+    setBusy(true); setError(null); setMessage(null);
     try {
-      const response = await api.verifyCode({ email, code });
+      const response = await api.verifyCode({ email: email.trim(), code });
       setSession(response.token, response.user, response.session_expires_at);
-      setCode('');
-      navigate('/');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to verify code');
-    } finally {
-      setBusy(false);
-    }
+      navigate("/");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not verify code");
+    } finally { setBusy(false); }
   }
-
   if (user) {
-    return (
-      <div className="mx-auto w-full max-w-xl">
-        <div className="rounded-[2rem] border border-white/10 bg-black/25 p-6 sm:p-7">
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex min-w-0 items-center gap-4">
-              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/5 text-zinc-50">
-                <UserIcon className="h-7 w-7" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
-                  Profile
-                </p>
-                <h2 className="truncate text-lg font-semibold text-zinc-50">{user.email}</h2>
-                {formattedExpiry && (
-                  <p className="mt-1 text-xs text-zinc-500">Valid until {formattedExpiry}</p>
-                )}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={clearSession}
-              aria-label="Sign out"
-              title="Sign out"
-              className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-zinc-400 transition hover:text-rose-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300"
-            >
-              <LogOutIcon className="h-6 w-6" />
-            </button>
-          </div>
-        </div>
-      </div>
-    );
+    return <Navigate to="/" replace />;
   }
 
   return (
-    <div className="flex w-full justify-center pt-4">
-      <form
-        onSubmit={step === 'email' ? handleRequestCode : handleVerifyCode}
-        className="w-full max-w-md space-y-6 rounded-[2rem] border border-white/10 bg-black/25 p-6 sm:p-7"
-      >
-        <div className="flex items-center gap-4">
-          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/6 text-zinc-50">
-            {step === 'email' ? (
-              <MailIcon className="h-7 w-7" />
-            ) : (
-              <UserIcon className="h-7 w-7" />
-            )}
-          </div>
-          <div className="min-w-0">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
-              {step === 'email' ? 'Profile' : 'Code'}
-            </p>
-            <p className="text-base font-medium text-zinc-50">
-              {step === 'email' ? 'Sign in with email' : 'Enter the 6-digit code'}
-            </p>
-          </div>
+    <section className="auth-wrap">
+      <form className="auth-card" onSubmit={submit}>
+        <div className="auth-heading">
+          <div className="profile-avatar">{step === "email" ? <MailIcon className="h-7 w-7" /> : <UserIcon className="h-7 w-7" />}</div>
+          <div><p className="eyebrow">{step === "email" ? "Welcome" : "Security code"}</p><h1>{step === "email" ? "Sign in to ANTOLEX" : "Check your email"}</h1></div>
         </div>
-
-        {step === 'email' ? (
-          <label className="grid gap-2 text-sm text-zinc-300">
-            <span className="sr-only">Email</span>
-            <input
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              disabled={busy}
-              placeholder="Email"
-              className="rounded-2xl border border-white/10 bg-zinc-950/70 px-4 py-3 text-zinc-50 outline-none transition focus:border-emerald-300 disabled:opacity-70"
-            />
-          </label>
+        {step === "email" ? (
+          <label className="form-field"><span>Email</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" autoComplete="email" required disabled={busy} /></label>
         ) : (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
-              <p className="truncate text-sm text-zinc-300">{email}</p>
-              <button
-                type="button"
-                onClick={() => {
-                  setStep('email');
-                  setCode('');
-                  setMessage(null);
-                  setError(null);
-                }}
-                className="shrink-0 text-xs font-medium text-zinc-500 transition hover:text-zinc-200"
-              >
-                Change
-              </button>
+          <div className="auth-code-step">
+            <div className="auth-email"><span>{email}</span><button type="button" onClick={() => { setStep("email"); setCode(""); }}>Change</button></div>
+            <div className="otp-grid">
+              {codeDigits.map((digit, index) => <input key={index} ref={(node) => { codeRefs.current[index] = node; }} value={digit} onChange={(event) => changeDigit(index, event)} onKeyDown={(event) => keyDown(index, event)} onPaste={paste} onFocus={(event) => event.currentTarget.select()} type="text" inputMode="numeric" autoComplete={index === 0 ? "one-time-code" : "off"} aria-label={`Code digit ${index + 1}`} disabled={busy} />)}
             </div>
-
-            <div className="flex items-center justify-between gap-2">
-              {codeDigits.map((digit, index) => (
-                <input
-                  key={index}
-                  ref={(node) => {
-                    codeRefs.current[index] = node;
-                  }}
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete={index === 0 ? 'one-time-code' : 'off'}
-                  value={digit}
-                  onChange={(event) => handleCodeSlotChange(index, event)}
-                  onKeyDown={(event) => handleCodeSlotKeyDown(index, event)}
-                  onPaste={handleCodePaste}
-                  onFocus={(event) => event.currentTarget.select()}
-                  disabled={busy}
-                  aria-label={`Code digit ${index + 1}`}
-                  className="h-14 w-12 rounded-2xl border border-white/10 bg-zinc-950/70 text-center text-lg font-semibold tabular-nums text-zinc-50 outline-none transition focus:border-emerald-300 disabled:opacity-70"
-                />
-              ))}
-            </div>
+            <button className="resend-button" type="button" disabled={busy || resendRemaining > 0} onClick={() => void requestCode()}>{resendRemaining > 0 ? `Resend in ${resendRemaining}s` : "Resend code"}</button>
           </div>
         )}
-
-        {message && <p className="text-sm text-emerald-300">{message}</p>}
-        {error && <p className="text-sm text-rose-300">{error}</p>}
-
-        <button
-          type="submit"
-          disabled={busy || (step === 'code' && code.length < OTP_LENGTH)}
-          className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-zinc-50 px-5 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
-        >
-          {step === 'email' ? (
-            <MailIcon className="h-6 w-6" />
-          ) : (
-            <UserIcon className="h-6 w-6" />
-          )}
-          {busy ? 'Working...' : step === 'email' ? 'Send code' : 'Confirm'}
-        </button>
+        {message && <p className="notice notice-success">{message}</p>}
+        {error && <p className="notice notice-error">{error}</p>}
+        <button className="primary-button auth-submit" type="submit" disabled={busy || (step === "code" && code.length !== OTP_LENGTH)}>{busy && <SpinnerIcon className="h-5 w-5 animate-spin" />}{busy ? "Working…" : step === "email" ? "Send code" : "Confirm"}</button>
       </form>
-    </div>
+    </section>
   );
 }

@@ -3,8 +3,8 @@ package main
 import (
 	"log"
 
-	"github.com/tozikron/tozikron-music/services/api/internal/config"
-	"github.com/tozikron/tozikron-music/services/api/internal/server"
+	"github.com/alexeytozik/antolex-music/services/api/internal/config"
+	"github.com/alexeytozik/antolex-music/services/api/internal/server"
 )
 
 func main() {
