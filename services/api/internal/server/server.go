@@ -136,15 +136,13 @@ func (s *Server) search(c *fiber.Ctx) error {
 	cursor := strings.TrimSpace(c.Query("cursor"))
 
 	cacheQuery := normalizeSearchQuery(query)
-	if cacheQuery == "" {
-		cacheQuery = "__all__"
-	}
+	cacheQueryFingerprint := searchQueryFingerprint(cacheQuery)
 	cacheGeneration := s.currentSearchCacheGeneration(ctx)
 	cacheKey := fmt.Sprintf(
 		"%sgen:%d:%s:page:%d:cursor:%s",
 		searchCacheNamespace,
 		cacheGeneration,
-		cacheQuery,
+		cacheQueryFingerprint,
 		page,
 		cursor,
 	)

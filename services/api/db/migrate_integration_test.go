@@ -111,8 +111,8 @@ func TestMigrateBackfillsLegacyLikesAndIsIdempotent(t *testing.T) {
 	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM track_likes WHERE user_id=$1 AND track_id=$2`, userID, trackID).Scan(&likeCount); err != nil {
 		t.Fatalf("count migrated likes: %v", err)
 	}
-	if migrationCount != 6 || likeCount != 1 {
-		t.Fatalf("migration rows=%d migrated likes=%d; want 6 and 1", migrationCount, likeCount)
+	if migrationCount != 7 || likeCount != 1 {
+		t.Fatalf("migration rows=%d migrated likes=%d; want 7 and 1", migrationCount, likeCount)
 	}
 
 	var readyShuffleIndex string
@@ -146,6 +146,78 @@ func TestMigrateBackfillsLegacyLikesAndIsIdempotent(t *testing.T) {
 	}
 	if !strings.Contains(uploadSizeConstraint, "52428800") {
 		t.Fatalf("upload size constraint does not enforce 50 MiB: %s", uploadSizeConstraint)
+	}
+
+	assertFullTextSearchSchema(t, ctx, db)
+}
+
+func assertFullTextSearchSchema(t *testing.T, ctx context.Context, db *pgxpool.Pool) {
+	t.Helper()
+
+	trackID := uuid.NewString()
+	var searchText string
+	var prefixMatch bool
+	if err := db.QueryRow(ctx, `
+		INSERT INTO library_tracks(
+			id,external_track_id,title,artist,album,cover_url,object_key,content_type,size_bytes
+		) VALUES(
+			$1,'fts-track','  Ace   of Spades  ','Motörhead','No   Remorse','','library/fts.m4a','audio/mp4',123
+		)
+		RETURNING search_text, search_vector @@ to_tsquery('simple', 'motorhead:*')
+	`, trackID).Scan(&searchText, &prefixMatch); err != nil {
+		t.Fatalf("insert full-text search fixture: %v", err)
+	}
+	if searchText != "ace of spades motorhead no remorse" {
+		t.Fatalf("normalized search_text=%q", searchText)
+	}
+	if !prefixMatch {
+		t.Fatal("weighted search_vector did not normalize diacritics or match a prefix")
+	}
+
+	for _, columnName := range []string{"search_text", "search_vector"} {
+		var generated string
+		if err := db.QueryRow(ctx, `
+			SELECT is_generated
+			FROM information_schema.columns
+			WHERE table_schema=current_schema()
+			  AND table_name='library_tracks'
+			  AND column_name=$1
+		`, columnName).Scan(&generated); err != nil {
+			t.Fatalf("load generated column %s: %v", columnName, err)
+		}
+		if generated != "ALWAYS" {
+			t.Fatalf("column %s is_generated=%q; want ALWAYS", columnName, generated)
+		}
+	}
+
+	for _, indexName := range []string{"idx_library_tracks_search_vector", "idx_library_tracks_search_trgm"} {
+		var definition string
+		if err := db.QueryRow(ctx, `
+			SELECT indexdef
+			FROM pg_indexes
+			WHERE schemaname=current_schema()
+			  AND tablename='library_tracks'
+			  AND indexname=$1
+		`, indexName).Scan(&definition); err != nil {
+			t.Fatalf("load search index %s: %v", indexName, err)
+		}
+		if !strings.Contains(definition, "USING gin") || !strings.Contains(definition, "WHERE (status = 'ready'::text)") {
+			t.Fatalf("search index %s has unexpected definition: %s", indexName, definition)
+		}
+	}
+
+	var obsoleteIndexCount int
+	if err := db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM pg_indexes
+		WHERE schemaname=current_schema()
+		  AND tablename='library_tracks'
+		  AND indexname='idx_library_tracks_search'
+	`).Scan(&obsoleteIndexCount); err != nil {
+		t.Fatalf("check obsolete search index: %v", err)
+	}
+	if obsoleteIndexCount != 0 {
+		t.Fatalf("obsolete search index count=%d; want 0", obsoleteIndexCount)
 	}
 }
 

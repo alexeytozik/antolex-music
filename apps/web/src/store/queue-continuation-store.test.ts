@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { StateStorage } from "zustand/middleware";
 
-import { createQueueContinuationStore } from "./queue-continuation-store";
+import {
+  createQueueContinuationStore,
+  QUEUE_CONTINUATION_STORAGE_KEY,
+} from "./queue-continuation-store";
 
 function createTestStorage(): StateStorage {
   const storage = new Map<string, string>();
@@ -15,6 +18,36 @@ function createTestStorage(): StateStorage {
 }
 
 describe("queue continuation store", () => {
+  it("does not restore a search cursor saved under the v1 key", () => {
+    const storage = createTestStorage();
+    storage.setItem(
+      "antolex-music-queue-continuation-v1",
+      JSON.stringify({
+        state: {
+          source: { kind: "search", query: "rammstein" },
+          cursor: "legacy-search-cursor",
+          page: 2,
+          hasMore: true,
+          queueContextId: "queue-context-1",
+        },
+        version: 0,
+      }),
+    );
+
+    const store = createQueueContinuationStore(
+      QUEUE_CONTINUATION_STORAGE_KEY,
+      storage,
+    );
+
+    expect(store.getState()).toMatchObject({
+      source: null,
+      cursor: null,
+      page: 1,
+      hasMore: false,
+      queueContextId: null,
+    });
+  });
+
   it("keeps the cursor and source that belong to the active queue", () => {
     const store = createQueueContinuationStore(
       `queue-continuation-${crypto.randomUUID()}`,

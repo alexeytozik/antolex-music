@@ -5,7 +5,9 @@ import {
   type StateStorage,
 } from "zustand/middleware";
 
-const DEFAULT_STORAGE_KEY = "antolex-music-queue-continuation-v1";
+export const QUEUE_CONTINUATION_STORAGE_KEY =
+  "antolex-music-queue-continuation-v2";
+export const SEARCH_CURSOR_STORAGE_VERSION = 2;
 
 export type QueueContinuationSource =
   | { kind: "search"; query: string }
@@ -65,7 +67,7 @@ function resolveStorage(customStorage?: StateStorage) {
 }
 
 export function createQueueContinuationStore(
-  storageKey = DEFAULT_STORAGE_KEY,
+  storageKey = QUEUE_CONTINUATION_STORAGE_KEY,
   storage?: StateStorage,
 ) {
   return create<QueueContinuationState>()(

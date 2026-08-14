@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -21,9 +22,13 @@ import (
 )
 
 const (
-	searchCacheNamespace  = "search:v7:"
+	searchCacheNamespace  = "search:v8:"
 	searchCacheVersionKey = searchCacheNamespace + "generation"
 	searchResultLimit     = 20
+	searchCursorVersion   = 2
+	searchModePrimary     = "primary"
+	searchModeFuzzy       = "fuzzy"
+	fuzzySearchThreshold  = 0.6
 )
 
 var nonSlugChars = regexp.MustCompile(`[^a-z0-9]+`)
@@ -34,9 +39,20 @@ type trackCursor struct {
 	ID        string    `json:"id"`
 }
 
+type searchCursor struct {
+	Version          int       `json:"v"`
+	Mode             string    `json:"m"`
+	Tier             int       `json:"t"`
+	Score            float64   `json:"s"`
+	Timestamp        time.Time `json:"ts"`
+	ID               string    `json:"id"`
+	QueryFingerprint string    `json:"q"`
+}
+
 type rankedTrack struct {
 	Track models.Track
-	Rank  float64
+	Tier  int
+	Score float64
 }
 
 func normalizeSearchQuery(query string) string { return strings.TrimSpace(strings.ToLower(query)) }
@@ -87,68 +103,211 @@ func decodeTrackCursor(raw string) (trackCursor, error) {
 	return cursor, nil
 }
 
+func searchQueryFingerprint(normalizedQuery string) string {
+	digest := sha256.Sum256([]byte(normalizedQuery))
+	return hex.EncodeToString(digest[:])
+}
+
+func encodeSearchCursor(item rankedTrack, mode, queryFingerprint string) string {
+	payload, err := json.Marshal(searchCursor{
+		Version:          searchCursorVersion,
+		Mode:             mode,
+		Tier:             item.Tier,
+		Score:            item.Score,
+		Timestamp:        item.Track.CreatedAt,
+		ID:               item.Track.ID,
+		QueryFingerprint: queryFingerprint,
+	})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func decodeSearchCursor(raw string) (searchCursor, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return searchCursor{}, err
+	}
+	var cursor searchCursor
+	if err := json.Unmarshal(decoded, &cursor); err != nil {
+		return searchCursor{}, err
+	}
+	if cursor.Version != searchCursorVersion ||
+		(cursor.Mode != searchModePrimary && cursor.Mode != searchModeFuzzy) ||
+		cursor.ID == "" || cursor.Timestamp.IsZero() || cursor.QueryFingerprint == "" {
+		return searchCursor{}, fmt.Errorf("invalid search cursor")
+	}
+	return cursor, nil
+}
+
+func normalizeSearchInput(ctx context.Context, tx pgx.Tx, query string) (string, string, error) {
+	var normalized, prefixQuery string
+	err := tx.QueryRow(ctx, `
+		WITH input AS (
+			SELECT antolex_normalize_search_text($1) AS normalized
+		), prefix AS (
+			SELECT string_agg(quote_literal(lexeme) || ':*', ' & ' ORDER BY lexeme) AS value
+			FROM input,
+			     unnest(tsvector_to_array(to_tsvector('simple', input.normalized))) AS lexeme
+		)
+		SELECT input.normalized, COALESCE(prefix.value, '')
+		FROM input CROSS JOIN prefix
+	`, query).Scan(&normalized, &prefixQuery)
+	return normalized, prefixQuery, err
+}
+
+func fuzzySearchEligible(normalizedQuery string) bool {
+	withoutSpaces := strings.ReplaceAll(normalizedQuery, " ", "")
+	return len([]rune(withoutSpaces)) >= 3
+}
+
 func (s *Server) searchLibraryTracks(ctx context.Context, query string, page int, cursorRaw string) ([]models.Track, models.Pagination, error) {
 	page = normalizePage(page)
 	if s.db == nil {
 		return []models.Track{}, buildPagination(page, 0), nil
 	}
 
-	normalized := normalizeSearchQuery(query)
-	like := "%" + normalized + "%"
-	var totalCount int
-	if err := s.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM library_tracks
-		WHERE status = 'ready' AND ($1 = '' OR lower(title || ' ' || artist || ' ' || album) LIKE $2)
-	`, normalized, like).Scan(&totalCount); err != nil {
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, buildPagination(page, 0), err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL pg_trgm.word_similarity_threshold = %g`, fuzzySearchThreshold)); err != nil {
 		return nil, buildPagination(page, 0), err
 	}
 
-	cursor, cursorErr := decodeTrackCursor(cursorRaw)
-	useCursor := cursorRaw != "" && cursorErr == nil
-	offset := (page - 1) * searchResultLimit
-	rows, err := s.db.Query(ctx, `
-		WITH ranked AS (
-			SELECT id::text, external_track_id, title, artist, album, duration_seconds, created_at,
-				CASE
-					WHEN $1 = '' THEN 0::double precision
-					WHEN lower(title) = $1 THEN 100::double precision
-					WHEN lower(title) LIKE $1 || '%' THEN 80::double precision
-					WHEN lower(artist) = $1 THEN 70::double precision
-					ELSE GREATEST(
-						similarity(lower(title), $1),
-						similarity(lower(artist), $1),
-						similarity(lower(album), $1)
-					) * 60
-				END AS relevance
+	normalized, prefixQuery, err := normalizeSearchInput(ctx, tx, query)
+	if err != nil {
+		return nil, buildPagination(page, 0), err
+	}
+
+	mode := searchModePrimary
+	var totalCount int
+	switch {
+	case normalized == "":
+		err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM library_tracks WHERE status = 'ready'`).Scan(&totalCount)
+	case prefixQuery != "":
+		err = tx.QueryRow(ctx, `
+			SELECT COUNT(*)
 			FROM library_tracks
-			WHERE status = 'ready' AND ($1 = '' OR lower(title || ' ' || artist || ' ' || album) LIKE $2)
-		)
-		SELECT id, external_track_id, title, artist, album, duration_seconds, created_at, relevance
-		FROM ranked
-		WHERE NOT $3 OR
-		      relevance < $4 OR
-		      (relevance = $4 AND created_at < $5) OR
-		      (relevance = $4 AND created_at = $5 AND id < $6)
-		ORDER BY relevance DESC, created_at DESC, id DESC
-		LIMIT $7 OFFSET $8
-	`, normalized, like, useCursor, cursor.Rank, cursor.Timestamp, cursor.ID, searchResultLimit+1, func() int {
-		if useCursor {
-			return 0
+			WHERE status = 'ready'
+			  AND search_vector @@ to_tsquery('simple', $1)
+		`, prefixQuery).Scan(&totalCount)
+	}
+	if err != nil {
+		return nil, buildPagination(page, 0), err
+	}
+
+	if normalized != "" && totalCount == 0 && fuzzySearchEligible(normalized) {
+		mode = searchModeFuzzy
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM library_tracks
+			WHERE status = 'ready'
+			  AND search_text %> $1
+			  AND word_similarity($1, search_text) >= $2
+		`, normalized, fuzzySearchThreshold).Scan(&totalCount); err != nil {
+			return nil, buildPagination(page, 0), err
 		}
-		return offset
-	}())
+	}
+
+	queryFingerprint := searchQueryFingerprint(normalized)
+	cursor, cursorErr := decodeSearchCursor(cursorRaw)
+	useCursor := cursorRaw != "" && cursorErr == nil &&
+		cursor.Mode == mode && cursor.QueryFingerprint == queryFingerprint
+	if cursorRaw != "" && !useCursor {
+		page = 1
+	}
+	offset := (page - 1) * searchResultLimit
+	if useCursor {
+		offset = 0
+	}
+
+	var rows pgx.Rows
+	switch {
+	case normalized == "":
+		rows, err = tx.Query(ctx, `
+			SELECT id::text, external_track_id, title, artist, album, duration_seconds, created_at,
+			       0 AS tier, 0::double precision AS score
+			FROM library_tracks
+			WHERE status = 'ready'
+			  AND (
+			      NOT $1 OR
+			      created_at < $2 OR
+			      (created_at = $2 AND id::text < $3)
+			  )
+			ORDER BY created_at DESC, id DESC
+			LIMIT $4 OFFSET $5
+		`, useCursor, cursor.Timestamp, cursor.ID, searchResultLimit+1, offset)
+	case mode == searchModePrimary && prefixQuery != "":
+		rows, err = tx.Query(ctx, `
+			WITH ranked AS (
+				SELECT id::text, external_track_id, title, artist, album, duration_seconds, created_at,
+				       CASE
+				           WHEN antolex_normalize_search_text(title) = $1 THEN 1
+				           WHEN starts_with(antolex_normalize_search_text(title), $1) THEN 2
+				           WHEN antolex_normalize_search_text(artist) = $1 THEN 3
+				           WHEN starts_with(antolex_normalize_search_text(artist), $1) THEN 4
+				           ELSE 5
+				       END AS tier,
+				       ts_rank_cd(search_vector, to_tsquery('simple', $2), 32)::double precision AS score
+				FROM library_tracks
+				WHERE status = 'ready'
+				  AND search_vector @@ to_tsquery('simple', $2)
+			)
+			SELECT id, external_track_id, title, artist, album, duration_seconds, created_at, tier, score
+			FROM ranked
+			WHERE NOT $3 OR
+			      tier > $4 OR
+			      (tier = $4 AND score < $5) OR
+			      (tier = $4 AND score = $5 AND created_at < $6) OR
+			      (tier = $4 AND score = $5 AND created_at = $6 AND id < $7)
+			ORDER BY tier ASC, score DESC, created_at DESC, id DESC
+			LIMIT $8 OFFSET $9
+		`, normalized, prefixQuery, useCursor, cursor.Tier, cursor.Score, cursor.Timestamp, cursor.ID, searchResultLimit+1, offset)
+	case mode == searchModeFuzzy:
+		rows, err = tx.Query(ctx, `
+			WITH ranked AS (
+				SELECT id::text, external_track_id, title, artist, album, duration_seconds, created_at,
+				       6 AS tier,
+				       word_similarity($1, search_text)::double precision AS score
+				FROM library_tracks
+				WHERE status = 'ready'
+				  AND search_text %> $1
+				  AND word_similarity($1, search_text) >= $2
+			)
+			SELECT id, external_track_id, title, artist, album, duration_seconds, created_at, tier, score
+			FROM ranked
+			WHERE NOT $3 OR
+			      tier > $4 OR
+			      (tier = $4 AND score < $5) OR
+			      (tier = $4 AND score = $5 AND created_at < $6) OR
+			      (tier = $4 AND score = $5 AND created_at = $6 AND id < $7)
+			ORDER BY tier ASC, score DESC, created_at DESC, id DESC
+			LIMIT $8 OFFSET $9
+		`, normalized, fuzzySearchThreshold, useCursor, cursor.Tier, cursor.Score, cursor.Timestamp, cursor.ID, searchResultLimit+1, offset)
+	default:
+		rows, err = tx.Query(ctx, `
+			SELECT id::text, external_track_id, title, artist, album, duration_seconds, created_at,
+			       0 AS tier, 0::double precision AS score
+			FROM library_tracks
+			WHERE FALSE
+		`)
+	}
 	if err != nil {
 		return nil, buildPagination(page, totalCount), err
 	}
-	defer rows.Close()
 
 	results := make([]rankedTrack, 0, searchResultLimit+1)
 	for rows.Next() {
 		var item rankedTrack
 		if err := rows.Scan(
 			&item.Track.ID, &item.Track.ExternalID, &item.Track.Title, &item.Track.Artist,
-			&item.Track.Album, &item.Track.DurationSeconds, &item.Track.CreatedAt, &item.Rank,
+			&item.Track.Album, &item.Track.DurationSeconds, &item.Track.CreatedAt, &item.Tier, &item.Score,
 		); err != nil {
+			rows.Close()
 			return nil, buildPagination(page, totalCount), err
 		}
 		item.Track.Status = "ready"
@@ -156,6 +315,11 @@ func (s *Server) searchLibraryTracks(ctx context.Context, query string, page int
 		results = append(results, item)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, buildPagination(page, totalCount), err
+	}
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
 		return nil, buildPagination(page, totalCount), err
 	}
 
@@ -170,7 +334,7 @@ func (s *Server) searchLibraryTracks(ctx context.Context, query string, page int
 	}
 	if pagination.HasNext && len(results) > 0 {
 		last := results[len(results)-1]
-		pagination.NextCursor = encodeTrackCursor(last.Track, last.Rank)
+		pagination.NextCursor = encodeSearchCursor(last, mode, queryFingerprint)
 	}
 	return tracks, pagination, nil
 }

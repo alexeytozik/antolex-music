@@ -64,6 +64,38 @@ func TestSearchCachesResults(t *testing.T) {
 	}
 }
 
+func TestSearchCacheDoesNotCollideWithLiteralAllQuery(t *testing.T) {
+	t.Parallel()
+
+	cache := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: cache.Addr()})
+	defer redisClient.Close()
+
+	srv := &Server{
+		cfg: config.Config{
+			CORSOrigins: []string{"http://localhost:5173"},
+		},
+		redis: redisClient,
+	}
+
+	app := fiber.New(fiber.Config{ErrorHandler: handleFiberError})
+	app.Get("/api/v1/search", srv.search)
+
+	empty := performJSONRequest[models.SearchResponse](t, app, http.MethodGet, "/api/v1/search?page=1")
+	literal := performJSONRequest[models.SearchResponse](t, app, http.MethodGet, "/api/v1/search?q=__all__&page=1")
+	literalCached := performJSONRequest[models.SearchResponse](t, app, http.MethodGet, "/api/v1/search?q=__all__&page=1")
+
+	if empty.Query != "" || empty.Cached {
+		t.Fatalf("unexpected empty-query response: %+v", empty)
+	}
+	if literal.Query != "__all__" || literal.Cached {
+		t.Fatalf("literal query collided with the empty-query cache entry: %+v", literal)
+	}
+	if literalCached.Query != "__all__" || !literalCached.Cached {
+		t.Fatalf("literal query did not use its own cache entry: %+v", literalCached)
+	}
+}
+
 func TestResolveTrackReturnsStorageUnavailableWithoutR2(t *testing.T) {
 	t.Parallel()
 
@@ -167,6 +199,68 @@ func TestTrackCursorRoundTrip(t *testing.T) {
 	}
 	if !decoded.Timestamp.Equal(track.CreatedAt) {
 		t.Fatalf("unexpected timestamp: %s", decoded.Timestamp)
+	}
+}
+
+func TestSearchCursorRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	item := rankedTrack{
+		Track: models.Track{
+			ID:        "8dba09c5-38f4-4783-8b8a-16a20c49bd0e",
+			CreatedAt: time.Date(2026, 8, 11, 12, 30, 0, 123000, time.UTC),
+		},
+		Tier:  5,
+		Score: 0.625,
+	}
+	fingerprint := searchQueryFingerprint("rammstein reise")
+	encoded := encodeSearchCursor(item, searchModePrimary, fingerprint)
+	if encoded == "" {
+		t.Fatal("expected non-empty search cursor")
+	}
+
+	decoded, err := decodeSearchCursor(encoded)
+	if err != nil {
+		t.Fatalf("decode search cursor: %v", err)
+	}
+	if decoded.Version != searchCursorVersion || decoded.Mode != searchModePrimary {
+		t.Fatalf("unexpected version/mode: %+v", decoded)
+	}
+	if decoded.Tier != item.Tier || decoded.Score != item.Score {
+		t.Fatalf("unexpected rank: %+v", decoded)
+	}
+	if decoded.ID != item.Track.ID || !decoded.Timestamp.Equal(item.Track.CreatedAt) {
+		t.Fatalf("unexpected track position: %+v", decoded)
+	}
+	if decoded.QueryFingerprint != fingerprint {
+		t.Fatalf("unexpected query fingerprint: %q", decoded.QueryFingerprint)
+	}
+}
+
+func TestSearchCursorRejectsLegacyTrackCursor(t *testing.T) {
+	t.Parallel()
+
+	legacy := encodeTrackCursor(models.Track{
+		ID:        "8dba09c5-38f4-4783-8b8a-16a20c49bd0e",
+		CreatedAt: time.Date(2026, 8, 11, 12, 30, 0, 0, time.UTC),
+	}, 42)
+	if _, err := decodeSearchCursor(legacy); err == nil {
+		t.Fatal("expected legacy cursor to be rejected")
+	}
+}
+
+func TestFuzzySearchEligibilityUsesCharactersNotBytes(t *testing.T) {
+	t.Parallel()
+
+	for query, want := range map[string]bool{
+		"ab":    false,
+		"аб":    false,
+		"abc":   true,
+		"а б в": true,
+	} {
+		if got := fuzzySearchEligible(query); got != want {
+			t.Errorf("fuzzySearchEligible(%q)=%v; want %v", query, got, want)
+		}
 	}
 }
 

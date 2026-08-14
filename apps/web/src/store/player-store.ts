@@ -7,6 +7,7 @@ import {
 
 import { APIError, api } from "../lib/api";
 import {
+  SEARCH_CURSOR_STORAGE_VERSION,
   startQueueContinuation,
   stopQueueContinuation,
   useQueueContinuationStore,
@@ -77,6 +78,7 @@ type SavedQueueContinuation = {
   cursor: string | null;
   page: number;
   hasMore: boolean;
+  searchCursorVersion?: number;
 };
 
 type PlayerState = {
@@ -276,6 +278,12 @@ function sanitizeSavedQueueContinuation(
   ) {
     return null;
   }
+  if (
+    source.kind === "search" &&
+    candidate.searchCursorVersion !== SEARCH_CURSOR_STORAGE_VERSION
+  ) {
+    return null;
+  }
   return {
     source,
     cursor: typeof candidate.cursor === "string" ? candidate.cursor : null,
@@ -284,6 +292,8 @@ function sanitizeSavedQueueContinuation(
         ? Math.max(1, Math.floor(candidate.page))
         : 1,
     hasMore: candidate.hasMore === true,
+    searchCursorVersion:
+      source.kind === "search" ? SEARCH_CURSOR_STORAGE_VERSION : undefined,
   };
 }
 
@@ -1051,6 +1061,10 @@ export function createPlayerStore(
                   cursor: continuation.cursor,
                   page: continuation.page,
                   hasMore: continuation.hasMore,
+                  searchCursorVersion:
+                    continuation.source.kind === "search"
+                      ? SEARCH_CURSOR_STORAGE_VERSION
+                      : undefined,
                 }
               : null;
           stopQueueContinuation();

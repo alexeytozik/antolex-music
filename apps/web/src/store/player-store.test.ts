@@ -63,6 +63,59 @@ afterEach(() => {
 });
 
 describe('player store queue session', () => {
+  it('drops an unversioned persisted search continuation', () => {
+    const storageKey = `test-player-${crypto.randomUUID()}`;
+    const persistedTrack = makeTrack(1);
+    const storage = createPreloadedStorage(storageKey, {
+      shuffleEnabled: true,
+      shuffleStateVersion: 1,
+      queueContextId: 'queue-context-1',
+      queue: [{ queueId: 'queue-item-1', track: persistedTrack }],
+      currentIndex: 0,
+      currentTime: 0,
+      preShuffleQueue: [{ queueId: 'queue-item-1', track: persistedTrack }],
+      preShuffleContinuation: {
+        source: { kind: 'search', query: 'rammstein' },
+        cursor: 'legacy-search-cursor',
+        page: 2,
+        hasMore: true,
+      },
+    });
+
+    const store = createPlayerStore(storageKey, storage);
+
+    expect(store.getState().preShuffleContinuation).toBeNull();
+  });
+
+  it('keeps a persisted likes continuation unchanged', () => {
+    const storageKey = `test-player-${crypto.randomUUID()}`;
+    const persistedTrack = makeTrack(1);
+    const storage = createPreloadedStorage(storageKey, {
+      shuffleEnabled: true,
+      shuffleStateVersion: 1,
+      queueContextId: 'queue-context-1',
+      queue: [{ queueId: 'queue-item-1', track: persistedTrack }],
+      currentIndex: 0,
+      currentTime: 0,
+      preShuffleQueue: [{ queueId: 'queue-item-1', track: persistedTrack }],
+      preShuffleContinuation: {
+        source: { kind: 'likes' },
+        cursor: 'likes-cursor',
+        page: 2,
+        hasMore: true,
+      },
+    });
+
+    const store = createPlayerStore(storageKey, storage);
+
+    expect(store.getState().preShuffleContinuation).toEqual({
+      source: { kind: 'likes' },
+      cursor: 'likes-cursor',
+      page: 2,
+      hasMore: true,
+    });
+  });
+
   it('replaces the queue and advances to the next track', () => {
     const store = createPlayerStore(`test-player-${crypto.randomUUID()}`, createTestStorage());
     const tracks = [
