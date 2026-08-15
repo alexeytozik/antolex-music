@@ -2,11 +2,28 @@ package models
 
 import "time"
 
+const (
+	AccessStatusPending = "pending"
+	AccessStatusActive  = "active"
+	AccessStatusBlocked = "blocked"
+)
+
 type User struct {
-	ID        string    `json:"id"`
-	Email     string    `json:"email"`
-	Active    bool      `json:"active"`
-	CreatedAt time.Time `json:"created_at"`
+	ID           string    `json:"id"`
+	Email        string    `json:"email"`
+	Active       bool      `json:"active"`
+	AccessStatus string    `json:"access_status"`
+	IsAdmin      bool      `json:"is_admin"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type AdminUser struct {
+	ID           string    `json:"id"`
+	Email        string    `json:"email"`
+	AccessStatus string    `json:"access_status"`
+	IsAdmin      bool      `json:"is_admin"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type Track struct {

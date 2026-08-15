@@ -4,12 +4,13 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./components/Shell";
 import { QueueContinuation } from "./components/QueueContinuation";
 import { UploadManagerProvider } from "./components/UploadManager";
-import { APIError, api } from "./lib/api";
+import { APIError, SESSION_INVALIDATED_EVENT, api } from "./lib/api";
 import {
   removeLegacyPlayerStorage,
   usePlayerStore,
 } from "./store/player-store";
 import { AddView } from "./views/AddView";
+import { AdminUsersView } from "./views/AdminUsersView";
 import { LikedSongsView } from "./views/LikedSongsView";
 import { ProfileView } from "./views/ProfileView";
 import { SearchView } from "./views/SearchView";
@@ -19,6 +20,26 @@ function PrivateRoute({ children, ready }: { children: ReactNode; ready: boolean
   if (!ready) return <div className="app-loading">Loading ANTOLEX Music…</div>;
   if (!user) return <Navigate to="/profile" replace />;
   return children;
+}
+
+export function AdminRoute({ children, ready }: { children: ReactNode; ready: boolean }) {
+  const user = usePlayerStore((state) => state.user);
+  if (!ready) return <div className="app-loading">Loading ANTOLEX Music…</div>;
+  if (!user) return <Navigate to="/profile" replace />;
+  if (!user.is_admin) return <Navigate to="/" replace />;
+  return children;
+}
+
+export function SessionInvalidationListener() {
+  const clearSession = usePlayerStore((state) => state.clearSession);
+
+  useEffect(() => {
+    const invalidate = () => clearSession();
+    window.addEventListener(SESSION_INVALIDATED_EVENT, invalidate);
+    return () => window.removeEventListener(SESSION_INVALIDATED_EVENT, invalidate);
+  }, [clearSession]);
+
+  return null;
 }
 
 function SessionBootstrap({ onReady }: { onReady: () => void }) {
@@ -74,6 +95,7 @@ export default function App() {
   const clearSession = usePlayerStore((state) => state.clearSession);
   return (
     <>
+      <SessionInvalidationListener />
       <SessionBootstrap onReady={() => setSessionReady(true)} />
       <QueueContinuation />
       <UploadManagerProvider
@@ -87,6 +109,7 @@ export default function App() {
             <Route path="/" element={<PrivateRoute ready={sessionReady}><SearchView /></PrivateRoute>} />
             <Route path="/liked" element={<PrivateRoute ready={sessionReady}><LikedSongsView /></PrivateRoute>} />
             <Route path="/add" element={<PrivateRoute ready={sessionReady}><AddView /></PrivateRoute>} />
+            <Route path="/admin" element={<AdminRoute ready={sessionReady}><AdminUsersView /></AdminRoute>} />
             <Route path="/profile" element={<ProfileView />} />
             <Route path="/auth" element={<Navigate to="/profile" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />

@@ -25,6 +25,7 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 17. Make playback controls consistent across mouse, touch, keyboard, and media keys: selecting the current track toggles pause/resume without rebuilding its queue or losing position. Space is a global play/pause shortcut after pointer navigation, while text editing, value controls, and buttons reached deliberately with Tab retain their native keyboard behavior.
 18. Keep the upload queue and its one-at-a-time processor mounted for the authenticated application lifetime instead of tying them to the Add route. Internal navigation must retain selected `File` handles and continue hashing/uploading/processing; a full browser reload still restores durable metadata as `needs_file`. Reconcile reselected files with existing `needs_file` rows before enforcing the 50-file capacity so a full batch can resume in one selection. Scope IndexedDB metadata to the authenticated user, stop local work immediately on logout, and use abortable single-flight processing polls so stale or unauthorized responses cannot cross account/session boundaries.
 19. Replace contiguous `LIKE` catalog search with PostgreSQL `simple` full-text search plus `pg_trgm`: accent-insensitive weighted metadata search, order-independent prefix terms, a typo-only fallback, stable versioned cursors, and matching frontend continuation invalidation without adding a separate search service.
+20. Restore owner-managed access without restoring product roles: `ADMIN_EMAILS` identifies protected administrators, newly verified accounts start as pending, existing accounts retain their current access, and an owner-only responsive `/admin` page can approve or block users. Blocked sessions lose API access immediately; administrators cannot block themselves or another configured administrator.
 
 ## Production consolidation (completed)
 
@@ -37,13 +38,13 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 
 ## Current local status
 
-- Milestones 1–12 are implemented locally; final verification is repeated after each playback change.
+- Milestones 1–20 are implemented locally; final verification is repeated after each production change.
 - The six confirmed legacy duplicates and the Cover Test track were removed through guarded worker jobs after explicit approval; the library has no unresolved hashes or exact SHA-256 duplicate groups.
 - The `antolex-music` R2 bucket is created, scoped credentials and CORS are configured, all 13 legacy objects are copied, and key/size plus full SHA-256 verification passed. The local API and worker now use the new bucket; the old bucket remains intact for the required seven-day rollback window.
 - `antolex.net` is an active Mailjet sending domain with SPF, DKIM, and DMARC published in Cloudflare. Local sign-in email now comes from `ANTOLEX Music <auth@antolex.net>` and was verified in Gmail Inbox.
 - The GitHub repository is renamed to `alexeytozik/antolex-music` and the local `origin` uses the new URL. Production deployment/DNS, duplicate merge/deletion, and old-bucket deletion remain behind the safety gates below.
 - The responsive presentation has two explicit modes. Desktop keeps the visual rhythm of the original player and catalog, updated to the ANTOLEX brand; mobile keeps the touch-first navigation and player designed for iOS and Android.
-- Any user who verifies a valid email address can browse, like, play, and upload music. The application exposes no roles, published-track management, or user-management controls.
+- Any valid email can request and verify a code, but a new account remains pending until a configured owner approves it on `/admin`. Owners can approve or block accounts; the application still exposes no general product roles or published-track management controls.
 - Likes remain private to each account through the `(user_id, track_id)` key; the mobile navigation contains only Search, Liked, and Add.
 - Embedded artwork is preserved whenever the source contains it; files without an image stream receive distinct metadata-derived ANTOLEX covers without pretending they are official album artwork.
 - Ordered and liked playback queues continue through cursor pages while retaining only a bounded consumed history. Shuffle uses a signed, indexed server cursor across the complete ready library, and transient stream/network failures recover automatically without a manual Retry.

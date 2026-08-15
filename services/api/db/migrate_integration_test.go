@@ -70,6 +70,25 @@ func TestMigrateBackfillsLegacyLikesAndIsIdempotent(t *testing.T) {
 		t.Fatalf("insert legacy like: %v", err)
 	}
 
+	mobileUploads, err := migrationFiles.ReadFile("migrations/0002_mobile_uploads.sql")
+	if err != nil {
+		t.Fatalf("read mobile uploads migration: %v", err)
+	}
+	if _, err := db.Exec(ctx, string(mobileUploads)); err != nil {
+		t.Fatalf("apply mobile uploads migration: %v", err)
+	}
+	mobileChecksum := sha256.Sum256(mobileUploads)
+	if _, err := db.Exec(ctx, `INSERT INTO schema_migrations(version,checksum) VALUES($1,$2)`, "0002_mobile_uploads.sql", hex.EncodeToString(mobileChecksum[:])); err != nil {
+		t.Fatalf("record mobile uploads migration: %v", err)
+	}
+	blockedUserID := uuid.NewString()
+	if _, err := db.Exec(ctx, `
+		INSERT INTO users(id,email,password_hash,active)
+		VALUES($1,'legacy-blocked@example.com','',FALSE)
+	`, blockedUserID); err != nil {
+		t.Fatalf("insert disabled legacy user: %v", err)
+	}
+
 	if err := Migrate(ctx, db); err != nil {
 		t.Fatalf("apply remaining migrations: %v", err)
 	}
@@ -86,19 +105,19 @@ func TestMigrateBackfillsLegacyLikesAndIsIdempotent(t *testing.T) {
 		t.Fatalf("migrated like track=%q liked_at=%s; want %q at %s", migratedTrackID, migratedLikedAt, trackID, likedAt)
 	}
 
-	var role, status, originalKey, playbackKey, coverKey string
+	var role, accessStatus, status, originalKey, playbackKey, coverKey string
 	var active bool
 	if err := db.QueryRow(ctx, `
-		SELECT users.role,users.active,track.status,
+		SELECT users.role,users.active,users.access_status,track.status,
 		       COALESCE(track.original_object_key,''),COALESCE(track.playback_object_key,''),
 		       COALESCE(track.cover_object_key,'')
 		FROM users JOIN library_tracks track ON track.id=$2
 		WHERE users.id=$1
-	`, userID, trackID).Scan(&role, &active, &status, &originalKey, &playbackKey, &coverKey); err != nil {
+	`, userID, trackID).Scan(&role, &active, &accessStatus, &status, &originalKey, &playbackKey, &coverKey); err != nil {
 		t.Fatalf("load migrated records: %v", err)
 	}
-	if role != "listener" || !active || status != "ready" {
-		t.Fatalf("migrated user/track role=%q active=%v status=%q", role, active, status)
+	if role != "listener" || !active || accessStatus != "active" || status != "ready" {
+		t.Fatalf("migrated user/track role=%q active=%v access=%q status=%q", role, active, accessStatus, status)
 	}
 	if originalKey != "library/legacy.m4a" || playbackKey != "library/legacy.m4a" || !strings.HasPrefix(coverKey, "library/covers/") {
 		t.Fatalf("migrated object keys original=%q playback=%q cover=%q", originalKey, playbackKey, coverKey)
@@ -111,8 +130,86 @@ func TestMigrateBackfillsLegacyLikesAndIsIdempotent(t *testing.T) {
 	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM track_likes WHERE user_id=$1 AND track_id=$2`, userID, trackID).Scan(&likeCount); err != nil {
 		t.Fatalf("count migrated likes: %v", err)
 	}
-	if migrationCount != 7 || likeCount != 1 {
-		t.Fatalf("migration rows=%d migrated likes=%d; want 7 and 1", migrationCount, likeCount)
+	if migrationCount != 8 || likeCount != 1 {
+		t.Fatalf("migration rows=%d migrated likes=%d; want 8 and 1", migrationCount, likeCount)
+	}
+
+	var blockedAccessStatus string
+	var blockedActive bool
+	if err := db.QueryRow(ctx, `SELECT access_status,active FROM users WHERE id=$1`, blockedUserID).Scan(&blockedAccessStatus, &blockedActive); err != nil {
+		t.Fatalf("load disabled legacy user: %v", err)
+	}
+	if blockedAccessStatus != "blocked" || blockedActive {
+		t.Fatalf("disabled legacy user access=%q active=%v; want blocked/false", blockedAccessStatus, blockedActive)
+	}
+
+	var pendingAccessStatus string
+	var pendingActive bool
+	if err := db.QueryRow(ctx, `
+		INSERT INTO users(email,password_hash)
+		VALUES('new-default@example.com','')
+		RETURNING access_status,active
+	`).Scan(&pendingAccessStatus, &pendingActive); err != nil {
+		t.Fatalf("insert user with access defaults: %v", err)
+	}
+	if pendingAccessStatus != "pending" || pendingActive {
+		t.Fatalf("new user defaults access=%q active=%v; want pending/false", pendingAccessStatus, pendingActive)
+	}
+
+	var legacyWriteStatus string
+	var legacyWriteActive bool
+	if err := db.QueryRow(ctx, `
+		INSERT INTO users(email,password_hash,active)
+		VALUES('legacy-rollback@example.com','',TRUE)
+		RETURNING access_status,active
+	`).Scan(&legacyWriteStatus, &legacyWriteActive); err != nil {
+		t.Fatalf("simulate previous API user insert: %v", err)
+	}
+	if legacyWriteStatus != "active" || !legacyWriteActive {
+		t.Fatalf("legacy insert access=%q active=%v; want active/true", legacyWriteStatus, legacyWriteActive)
+	}
+	if _, err := db.Exec(ctx, `
+		UPDATE users
+		SET access_status='blocked',active=FALSE
+		WHERE email='legacy-rollback@example.com'
+	`); err != nil {
+		t.Fatalf("block legacy rollback fixture: %v", err)
+	}
+	if err := db.QueryRow(ctx, `
+		INSERT INTO users(email,password_hash,active)
+		VALUES('legacy-rollback@example.com','',TRUE)
+		ON CONFLICT (email) DO UPDATE SET active=TRUE,updated_at=NOW()
+		RETURNING access_status,active
+	`).Scan(&legacyWriteStatus, &legacyWriteActive); err != nil {
+		t.Fatalf("simulate previous API conflict update: %v", err)
+	}
+	if legacyWriteStatus != "active" || !legacyWriteActive {
+		t.Fatalf("legacy update access=%q active=%v; want active/true", legacyWriteStatus, legacyWriteActive)
+	}
+	for _, constraintName := range []string{"users_access_status_check", "users_active_access_status_check"} {
+		var stored string
+		if err := db.QueryRow(ctx, `
+			SELECT conname FROM pg_constraint
+			WHERE conrelid='users'::regclass AND conname=$1
+		`, constraintName).Scan(&stored); err != nil {
+			t.Fatalf("load access constraint %s: %v", constraintName, err)
+		}
+	}
+	var accessIndex string
+	if err := db.QueryRow(ctx, `
+		SELECT indexname FROM pg_indexes
+		WHERE schemaname=current_schema() AND indexname='idx_users_access_list'
+	`).Scan(&accessIndex); err != nil {
+		t.Fatalf("load users access index: %v", err)
+	}
+	var legacyTrigger string
+	if err := db.QueryRow(ctx, `
+		SELECT tgname FROM pg_trigger
+		WHERE tgrelid='users'::regclass
+		  AND tgname='users_legacy_active_sync'
+		  AND NOT tgisinternal
+	`).Scan(&legacyTrigger); err != nil {
+		t.Fatalf("load legacy access compatibility trigger: %v", err)
 	}
 
 	var readyShuffleIndex string

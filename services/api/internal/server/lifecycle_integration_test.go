@@ -32,6 +32,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	database "github.com/alexeytozik/antolex-music/services/api/db"
+	"github.com/alexeytozik/antolex-music/services/api/internal/config"
 	"github.com/alexeytozik/antolex-music/services/api/internal/models"
 )
 
@@ -39,7 +40,7 @@ func TestConcurrentTrackSHA256Constraint(t *testing.T) {
 	db := newLifecycleTestDB(t)
 	ctx := context.Background()
 	userID := uuid.NewString()
-	if _, err := db.Exec(ctx, `INSERT INTO users(id,email,password_hash,role,active) VALUES($1,$2,'','uploader',TRUE)`, userID, "duplicates@example.com"); err != nil {
+	if _, err := db.Exec(ctx, `INSERT INTO users(id,email,password_hash,role,active,access_status) VALUES($1,$2,'','uploader',TRUE,'active')`, userID, "duplicates@example.com"); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 
@@ -94,28 +95,47 @@ func TestConcurrentTrackSHA256Constraint(t *testing.T) {
 	}
 }
 
-func TestVerifiedEmailCreatesAndReactivatesUser(t *testing.T) {
+func TestVerifiedEmailPreservesOwnerManagedAccess(t *testing.T) {
 	db := newLifecycleTestDB(t)
 	ctx := context.Background()
-	srv := &Server{db: db}
+	srv := &Server{db: db, cfg: config.Config{AdminEmails: []string{"owner@example.com"}}}
 
 	created, err := srv.upsertVerifiedUser(ctx, " New.Listener@Example.com ")
 	if err != nil {
 		t.Fatalf("create verified user: %v", err)
 	}
-	if created.ID == "" || created.Email != "new.listener@example.com" || !created.Active {
+	if created.ID == "" || created.Email != "new.listener@example.com" || created.Active || created.AccessStatus != models.AccessStatusPending || created.IsAdmin {
 		t.Fatalf("unexpected created user: %+v", created)
 	}
 
-	if _, err := db.Exec(ctx, `UPDATE users SET active=FALSE WHERE id=$1`, created.ID); err != nil {
-		t.Fatalf("disable user: %v", err)
+	if _, err := db.Exec(ctx, `UPDATE users SET active=TRUE,access_status='active' WHERE id=$1`, created.ID); err != nil {
+		t.Fatalf("approve user: %v", err)
 	}
-	reactivated, err := srv.upsertVerifiedUser(ctx, "NEW.LISTENER@EXAMPLE.COM")
+	approved, err := srv.upsertVerifiedUser(ctx, "NEW.LISTENER@EXAMPLE.COM")
 	if err != nil {
-		t.Fatalf("reactivate verified user: %v", err)
+		t.Fatalf("verify approved user: %v", err)
 	}
-	if reactivated.ID != created.ID || !reactivated.Active {
-		t.Fatalf("unexpected reactivated user: %+v", reactivated)
+	if approved.ID != created.ID || !approved.Active || approved.AccessStatus != models.AccessStatusActive {
+		t.Fatalf("unexpected approved user: %+v", approved)
+	}
+
+	if _, err := db.Exec(ctx, `UPDATE users SET active=FALSE,access_status='blocked' WHERE id=$1`, created.ID); err != nil {
+		t.Fatalf("block user: %v", err)
+	}
+	blocked, err := srv.upsertVerifiedUser(ctx, "new.listener@example.com")
+	if err != nil {
+		t.Fatalf("verify blocked user: %v", err)
+	}
+	if blocked.ID != created.ID || blocked.Active || blocked.AccessStatus != models.AccessStatusBlocked {
+		t.Fatalf("blocked user was reactivated: %+v", blocked)
+	}
+
+	owner, err := srv.upsertVerifiedUser(ctx, " OWNER@example.com ")
+	if err != nil {
+		t.Fatalf("create configured owner: %v", err)
+	}
+	if !owner.Active || owner.AccessStatus != models.AccessStatusActive || !owner.IsAdmin {
+		t.Fatalf("configured owner was not activated: %+v", owner)
 	}
 
 	var count int
@@ -465,7 +485,7 @@ func insertLifecycleUploadWithSize(t *testing.T, db *pgxpool.Pool, status, hash 
 	}
 	fixture.incomingKey = "incoming/" + fixture.uploadID + "/original.wav"
 	email := fixture.userID + "@example.com"
-	if _, err := db.Exec(ctx, `INSERT INTO users(id,email,password_hash,role,active) VALUES($1,$2,'','uploader',TRUE)`, fixture.userID, email); err != nil {
+	if _, err := db.Exec(ctx, `INSERT INTO users(id,email,password_hash,role,active,access_status) VALUES($1,$2,'','uploader',TRUE,'active')`, fixture.userID, email); err != nil {
 		t.Fatalf("insert lifecycle user: %v", err)
 	}
 	trackStatus := status

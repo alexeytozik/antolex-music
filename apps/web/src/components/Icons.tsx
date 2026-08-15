@@ -43,6 +43,15 @@ export function UserIcon(props: IconProps) {
   );
 }
 
+export function AdminIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M12 3 5 6v5c0 4.5 2.8 8.2 7 10 4.2-1.8 7-5.5 7-10V6Z" />
+      <path d="M9 12.2 11.1 14 15 9.8" />
+    </IconBase>
+  );
+}
+
 export function PlayIcon(props: IconProps) {
   return (
     <IconBase {...props}>

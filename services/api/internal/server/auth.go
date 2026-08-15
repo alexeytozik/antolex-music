@@ -185,6 +185,15 @@ func (s *Server) verifyCode(c *fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to create user")
 	}
+	switch user.AccessStatus {
+	case models.AccessStatusPending:
+		return writeAPIError(c, fiber.StatusForbidden, "access_pending", "Your account is waiting for owner approval. Once approved, request a new code.", nil)
+	case models.AccessStatusBlocked:
+		return writeAPIError(c, fiber.StatusForbidden, "access_blocked", "Your account has been blocked", nil)
+	case models.AccessStatusActive:
+	default:
+		return fiber.NewError(fiber.StatusInternalServerError, "invalid user access status")
+	}
 
 	token, expiresAt, err := s.signToken(user.ID, user.Email)
 	if err != nil {
@@ -216,14 +225,26 @@ func (s *Server) consumeAuthCode(ctx context.Context, email, expectedHash string
 
 func (s *Server) upsertVerifiedUser(ctx context.Context, email string) (models.User, error) {
 	var user models.User
+	isAdmin := s.isAdminEmail(email)
+	accessStatus := models.AccessStatusPending
+	if isAdmin {
+		accessStatus = models.AccessStatusActive
+	}
 	err := s.db.QueryRow(ctx, `
-		INSERT INTO users (email, password_hash, active)
-		VALUES ($1, '', TRUE)
+		INSERT INTO users (email, password_hash, active, access_status)
+		VALUES ($1, '', $2 = 'active', $2)
 		ON CONFLICT (email) DO UPDATE
-		SET active = TRUE, updated_at = NOW()
-		RETURNING id::text, email, active, created_at
-	`, normalizeEmail(email)).Scan(&user.ID, &user.Email, &user.Active, &user.CreatedAt)
-	return user, err
+		SET access_status = CASE WHEN $3 THEN 'active' ELSE users.access_status END,
+		    active = CASE WHEN $3 THEN TRUE ELSE users.access_status = 'active' END,
+		    updated_at = NOW()
+		RETURNING id::text, email, access_status, created_at
+	`, normalizeEmail(email), accessStatus, isAdmin).Scan(
+		&user.ID, &user.Email, &user.AccessStatus, &user.CreatedAt,
+	)
+	if err != nil {
+		return models.User{}, err
+	}
+	return s.applyUserAccess(user), nil
 }
 
 func (s *Server) setSessionCookie(c *fiber.Ctx, token string, expiresAt time.Time) {
@@ -253,12 +274,16 @@ func (s *Server) exchangeLegacyToken(c *fiber.Ctx) error {
 }
 
 func (s *Server) logout(c *fiber.Ctx) error {
+	s.clearSessionCookie(c)
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+func (s *Server) clearSessionCookie(c *fiber.Ctx) {
 	c.Cookie(&fiber.Cookie{
 		Name: s.cfg.CookieName, Value: "", Path: "/", HTTPOnly: true,
 		Secure: s.cfg.CookieSecure, SameSite: fiber.CookieSameSiteLaxMode,
 		Expires: time.Unix(0, 0), MaxAge: -1,
 	})
-	return c.SendStatus(fiber.StatusNoContent)
 }
 
 const timeLayout = "2006-01-02T15:04:05Z07:00"

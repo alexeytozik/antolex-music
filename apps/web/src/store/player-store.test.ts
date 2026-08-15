@@ -63,6 +63,25 @@ afterEach(() => {
 });
 
 describe('player store queue session', () => {
+  it('keeps owner access fields when a session is stored', () => {
+    const store = createPlayerStore(`test-player-${crypto.randomUUID()}`, createTestStorage());
+
+    store.getState().setSession(null, {
+      id: 'owner-1',
+      email: 'owner@example.com',
+      is_admin: true,
+      access_status: 'active',
+      created_at: '2026-08-14T00:00:00Z',
+      updated_at: '2026-08-15T00:00:00Z',
+    }, '2026-09-13T00:00:00Z');
+
+    expect(store.getState().user).toMatchObject({
+      is_admin: true,
+      access_status: 'active',
+      updated_at: '2026-08-15T00:00:00Z',
+    });
+  });
+
   it('drops an unversioned persisted search continuation', () => {
     const storageKey = `test-player-${crypto.randomUUID()}`;
     const persistedTrack = makeTrack(1);

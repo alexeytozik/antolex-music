@@ -51,7 +51,7 @@ afterEach(() => {
 });
 
 describe("Shell navigation", () => {
-  it("shows exactly the three library destinations for a signed-in user", () => {
+  it("shows exactly the three library destinations for a non-admin user", () => {
     usePlayerStore.setState({
       user: {
         id: "user-1",
@@ -69,6 +69,26 @@ describe("Shell navigation", () => {
     expect(bottomLinks.map((link) => link.textContent)).toEqual(["Search", "Liked", "Add"]);
     expect(container.querySelector('[href="/profile"]')).toBeNull();
     expect(container.textContent).not.toContain("Profile");
+    expect(container.querySelector('[href="/admin"]')).toBeNull();
+  });
+
+  it("adds the admin destination to desktop and mobile navigation for the owner", () => {
+    usePlayerStore.setState({
+      user: {
+        id: "owner-1",
+        email: "owner@example.com",
+        is_admin: true,
+        access_status: "active",
+        created_at: "2026-08-14T00:00:00Z",
+      },
+    });
+
+    const container = renderShell();
+    const desktopAdmin = container.querySelector('.desktop-nav a[href="/admin"]');
+    const mobileAdmin = container.querySelector('.bottom-nav a[href="/admin"]');
+
+    expect(desktopAdmin?.getAttribute("aria-label")).toBe("Admin");
+    expect(mobileAdmin?.textContent).toBe("Admin");
   });
 
   it("keeps authentication in the header for a guest", () => {

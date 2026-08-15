@@ -227,7 +227,10 @@ function normalizeUser(user: User): User {
     id: user.id,
     email: user.email,
     active: user.active,
+    is_admin: user.is_admin,
+    access_status: user.access_status,
     created_at: user.created_at,
+    updated_at: user.updated_at,
   };
 }
 

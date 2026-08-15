@@ -66,6 +66,11 @@ func New(cfg config.Config) (*fiber.App, func(), error) {
 		db:    db,
 		redis: redisClient,
 	}
+	if err := srv.activateConfiguredAdmins(context.Background()); err != nil {
+		_ = redisClient.Close()
+		db.Close()
+		return nil, nil, fmt.Errorf("activate configured admins: %w", err)
+	}
 	if catalog, err := newSeedCatalog(cfg); err == nil {
 		srv.seedCatalog = catalog
 	}
@@ -90,7 +95,7 @@ func newApp(s *Server) *fiber.App {
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     strings.Join(s.cfg.CORSOrigins, ","),
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
-		AllowMethods:     "GET,POST,DELETE,OPTIONS",
+		AllowMethods:     "GET,POST,PATCH,DELETE,OPTIONS",
 		AllowCredentials: true,
 	}))
 
@@ -111,6 +116,8 @@ func newApp(s *Server) *fiber.App {
 	secured.Get("/me/likes/ids", s.listLikeIDs)
 	secured.Post("/me/likes", s.addLike)
 	secured.Delete("/me/likes/:externalID", s.removeLike)
+	secured.Get("/admin/users", s.adminMiddleware, s.listAdminUsers)
+	secured.Patch("/admin/users/:id", s.adminMiddleware, s.updateAdminUserStatus)
 	uploads := secured.Group("/me/uploads")
 	uploads.Post("", s.createUpload)
 	uploads.Get("", s.listUploads)
@@ -383,13 +390,13 @@ func (s *Server) ensureCurrentUser(ctx context.Context, userID string, email str
 	var user models.User
 	err := s.db.QueryRow(
 		ctx,
-		`SELECT id::text, email, active, created_at
+		`SELECT id::text, email, access_status, created_at
 		 FROM users
-		 WHERE id = $1 AND lower(email) = lower($2) AND active = TRUE`,
+		 WHERE id = $1 AND lower(email) = lower($2)`,
 		userID, email,
-	).Scan(&user.ID, &user.Email, &user.Active, &user.CreatedAt)
+	).Scan(&user.ID, &user.Email, &user.AccessStatus, &user.CreatedAt)
 	if err == nil {
-		return user, nil
+		return s.applyUserAccess(user), nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return models.User{}, err
@@ -430,7 +437,18 @@ func (s *Server) authenticateRequest(c *fiber.Ctx, allowLegacyExchange bool) err
 	c.Locals("userID", userID)
 	c.Locals("email", email)
 	user, err := s.resolveAuthenticatedUser(c.UserContext(), userID, email)
-	if err != nil || !user.Active {
+	if err != nil {
+		return fiber.NewError(fiber.StatusUnauthorized, "user is not allowed")
+	}
+	switch user.AccessStatus {
+	case models.AccessStatusPending:
+		s.clearSessionCookie(c)
+		return writeAPIError(c, fiber.StatusForbidden, "access_pending", "Your account is waiting for owner approval. Once approved, request a new code.", nil)
+	case models.AccessStatusBlocked:
+		s.clearSessionCookie(c)
+		return writeAPIError(c, fiber.StatusForbidden, "access_blocked", "Your account has been blocked", nil)
+	case models.AccessStatusActive:
+	default:
 		return fiber.NewError(fiber.StatusUnauthorized, "user is not allowed")
 	}
 	c.Locals("user", user)
@@ -439,7 +457,11 @@ func (s *Server) authenticateRequest(c *fiber.Ctx, allowLegacyExchange bool) err
 
 func (s *Server) resolveAuthenticatedUser(ctx context.Context, userID, email string) (models.User, error) {
 	if s.authUserResolver != nil {
-		return s.authUserResolver(ctx, userID, email)
+		user, err := s.authUserResolver(ctx, userID, email)
+		if err != nil {
+			return models.User{}, err
+		}
+		return s.applyUserAccess(user), nil
 	}
 	return s.ensureCurrentUser(ctx, userID, email)
 }

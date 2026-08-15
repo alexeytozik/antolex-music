@@ -1,4 +1,7 @@
 import type {
+  AccessStatus,
+  AdminUser,
+  AdminUsersResponse,
   APIErrorPayload,
   APIErrorResponse,
   AuthSession,
@@ -16,6 +19,8 @@ import type {
 
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080/api/v1";
+
+export const SESSION_INVALIDATED_EVENT = "antolex:session-invalidated";
 
 type RequestOptions = RequestInit & { token?: string | null };
 
@@ -43,6 +48,16 @@ function isAPIErrorResponse(value: unknown): value is APIErrorResponse {
   );
 }
 
+function notifyInvalidSession(status: number, code: string) {
+  const accessRevoked =
+    status === 403 && (code === "access_pending" || code === "access_blocked");
+  if (status !== 401 && !accessRevoked) return;
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent(SESSION_INVALIDATED_EVENT, { detail: { status, code } }),
+  );
+}
+
 async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
   const headers = new Headers(init.headers);
   const isFormData =
@@ -63,12 +78,15 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
     if (contentType.includes("application/json")) {
       const payload = (await response.json()) as unknown;
       if (isAPIErrorResponse(payload)) {
+        notifyInvalidSession(response.status, payload.error.code);
         throw new APIError(response.status, payload.error);
       }
     }
     const message = await response.text();
+    const code = response.status === 401 ? "unauthorized" : "request_failed";
+    notifyInvalidSession(response.status, code);
     throw new APIError(response.status, {
-      code: response.status === 401 ? "unauthorized" : "request_failed",
+      code,
       message: message || "Request failed",
     });
   }
@@ -114,6 +132,16 @@ export const api = {
   },
   getProfile(token?: string | null) {
     return request<User>("/me", { token });
+  },
+  getAdminUsers(cursor: string | null = null, signal?: AbortSignal) {
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+    return request<AdminUsersResponse>(`/admin/users${query}`, { signal });
+  },
+  updateAdminUserStatus(id: string, status: Extract<AccessStatus, "active" | "blocked">) {
+    return request<AdminUser>(`/admin/users/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    });
   },
   searchWithCursor(
     query: string,

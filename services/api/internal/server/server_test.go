@@ -280,7 +280,7 @@ func TestCatalogRequiresSession(t *testing.T) {
 	}
 }
 
-func TestManagementRoutesAreNotExposed(t *testing.T) {
+func TestRemovedManagementRoutesStayHiddenAndAdminRoutesRequireOwner(t *testing.T) {
 	t.Parallel()
 
 	user := models.User{
@@ -313,8 +313,6 @@ func TestManagementRoutesAreNotExposed(t *testing.T) {
 		{method: http.MethodDelete, path: "/api/v1/tracks/example"},
 		{method: http.MethodGet, path: "/api/v1/access/users"},
 		{method: http.MethodPatch, path: "/api/v1/access/users"},
-		{method: http.MethodGet, path: "/api/v1/admin/users"},
-		{method: http.MethodPatch, path: "/api/v1/admin/users"},
 	} {
 		req := httptest.NewRequest(route.method, route.path, nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -325,6 +323,26 @@ func TestManagementRoutesAreNotExposed(t *testing.T) {
 		res.Body.Close()
 		if res.StatusCode != http.StatusNotFound {
 			t.Fatalf("%s %s status = %d; want 404", route.method, route.path, res.StatusCode)
+		}
+	}
+
+	for _, route := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/api/v1/admin/users"},
+		{method: http.MethodPatch, path: "/api/v1/admin/users/31b86bb0-9ee4-4d65-8b98-a1c9c6aaf429"},
+	} {
+		req := httptest.NewRequest(route.method, route.path, strings.NewReader(`{"status":"active"}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+		res, requestErr := app.Test(req)
+		if requestErr != nil {
+			t.Fatalf("%s %s failed: %v", route.method, route.path, requestErr)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s %s status = %d; want 403", route.method, route.path, res.StatusCode)
 		}
 	}
 }

@@ -26,7 +26,7 @@ if [[ ! -e /home/atozik/antolex-music/shared/.env ]]; then
 fi
 ```
 
-Fill `/home/atozik/antolex-music/shared/.env` from `.env.example`. Explicitly set `APP_ENV=production`, `SESSION_COOKIE_SECURE=true`, and a random `JWT_SECRET` of at least 32 characters. If the prior release used another JWT secret, put it temporarily in `LEGACY_JWT_SECRET` so old localStorage sessions can exchange once; remove it after the migration window. Set the same strong database credentials in `POSTGRES_*`, `COMPOSE_DATABASE_URL`, and `DATABASE_URL`, URL-encoding special characters. Never paste this file into Actions logs or tickets.
+Fill `/home/atozik/antolex-music/shared/.env` from `.env.example`. Explicitly set `APP_ENV=production`, `SESSION_COOKIE_SECURE=true`, `ADMIN_EMAILS=tozikalexey@gmail.com`, and a random `JWT_SECRET` of at least 32 characters. If the prior release used another JWT secret, put it temporarily in `LEGACY_JWT_SECRET` so old localStorage sessions can exchange once; remove it after the migration window. Set the same strong database credentials in `POSTGRES_*`, `COMPOSE_DATABASE_URL`, and `DATABASE_URL`, URL-encoding special characters. Never paste this file into Actions logs or tickets.
 
 If an existing deployment lives elsewhere, copy its `.env` into `shared/.env`, verify mode `600`, and point `current` at that exact old release before the first workflow deployment. This gives the workflow an automatic application rollback target:
 

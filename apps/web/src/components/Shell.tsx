@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 
-import { HeartIcon, LogOutIcon, PlusIcon, SearchIcon, UserIcon } from "./Icons";
+import { AdminIcon, HeartIcon, LogOutIcon, PlusIcon, SearchIcon, UserIcon } from "./Icons";
 import { Player } from "./Player";
 import { api } from "../lib/api";
 import {
@@ -21,6 +21,9 @@ export function Shell() {
     { to: "/", label: "Search", icon: SearchIcon, end: true },
     { to: "/liked", label: "Liked", icon: HeartIcon },
     { to: "/add", label: "Add", icon: PlusIcon },
+    ...(user?.is_admin
+      ? [{ to: "/admin", label: "Admin", icon: AdminIcon }]
+      : []),
   ];
 
   useEffect(() => {

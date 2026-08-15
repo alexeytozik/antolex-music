@@ -10,7 +10,7 @@ import {
 import { Navigate, useNavigate } from "react-router-dom";
 
 import { MailIcon, SpinnerIcon, UserIcon } from "../components/Icons";
-import { api } from "../lib/api";
+import { APIError, api } from "../lib/api";
 import { usePlayerStore } from "../store/player-store";
 
 const OTP_LENGTH = 6;
@@ -107,7 +107,15 @@ export function ProfileView() {
       setSession(response.token, response.user, response.session_expires_at);
       navigate("/");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not verify code");
+      if (reason instanceof APIError && reason.code === "access_pending") {
+        setStep("email");
+        setCode("");
+        setMessage("Approval requested. Once the owner approves this email, request a new code.");
+      } else if (reason instanceof APIError && reason.code === "access_blocked") {
+        setError("This account has been blocked by the owner.");
+      } else {
+        setError(reason instanceof Error ? reason.message : "Could not verify code");
+      }
     } finally { setBusy(false); }
   }
   if (user) {

@@ -6,6 +6,7 @@ x-app-environment: &app-environment
   REDIS_URL: redis://redis:6379/0
   JWT_SECRET: ${JWT_SECRET:-change-me}
   LEGACY_JWT_SECRET: ${LEGACY_JWT_SECRET:-}
+  ADMIN_EMAILS: ${ADMIN_EMAILS:-tozikalexey@gmail.com}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,https://music.antolex.net}
   AUTH_CODE_TTL: ${AUTH_CODE_TTL:-10m}
   SESSION_TTL: ${SESSION_TTL:-720h}

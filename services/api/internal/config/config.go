@@ -9,6 +9,8 @@ import (
 	"github.com/joho/godotenv"
 )
 
+const defaultAdminEmail = "tozikalexey@gmail.com"
+
 type Config struct {
 	AppEnv            string
 	Port              string
@@ -16,6 +18,7 @@ type Config struct {
 	RedisURL          string
 	JWTSecret         string
 	LegacyJWTSecret   string
+	AdminEmails       []string
 	CORSOrigins       []string
 	AuthCodeTTL       time.Duration
 	SessionTTL        time.Duration
@@ -43,6 +46,7 @@ func Load() Config {
 		RedisURL:          getEnv("REDIS_URL", "redis://localhost:6379/0"),
 		JWTSecret:         getEnv("JWT_SECRET", "change-me"),
 		LegacyJWTSecret:   getEnv("LEGACY_JWT_SECRET", ""),
+		AdminEmails:       splitNormalizedEmails(getEnv("ADMIN_EMAILS", "")),
 		CORSOrigins:       splitCSV(getEnv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")),
 		AuthCodeTTL:       getDuration("AUTH_CODE_TTL", 10*time.Minute),
 		SessionTTL:        getDuration("SESSION_TTL", 30*24*time.Hour),
@@ -65,6 +69,26 @@ func Load() Config {
 	}
 
 	return cfg
+}
+
+func splitNormalizedEmails(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts)+1)
+	seen := make(map[string]struct{}, len(parts)+1)
+	seen[defaultAdminEmail] = struct{}{}
+	out = append(out, defaultAdminEmail)
+	for _, part := range parts {
+		email := strings.ToLower(strings.TrimSpace(part))
+		if email == "" {
+			continue
+		}
+		if _, exists := seen[email]; exists {
+			continue
+		}
+		seen[email] = struct{}{}
+		out = append(out, email)
+	}
+	return out
 }
 
 func getBool(key string, fallback bool) bool {

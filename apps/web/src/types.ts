@@ -45,7 +45,22 @@ export type User = {
   id: string;
   email: string;
   active?: boolean;
+  is_admin?: boolean;
+  access_status?: AccessStatus;
   created_at: string;
+  updated_at?: string;
+};
+
+export type AccessStatus = "pending" | "active" | "blocked";
+
+export type AdminUser = User & {
+  access_status: AccessStatus;
+  is_admin: boolean;
+};
+
+export type AdminUsersResponse = {
+  results: AdminUser[];
+  next_cursor?: string;
 };
 
 export type AuthSession = {

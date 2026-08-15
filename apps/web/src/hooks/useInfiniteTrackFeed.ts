@@ -163,7 +163,7 @@ export function useInfiniteSentinel(
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const node = ref.current;
-    if (!node || !enabled) return;
+    if (!node || !enabled || typeof IntersectionObserver === "undefined") return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) onVisible();
