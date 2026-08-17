@@ -32,4 +32,21 @@ describe("API session invalidation", () => {
     expect(invalidated).toHaveBeenCalledTimes(3);
     window.removeEventListener(SESSION_INVALIDATED_EVENT, invalidated);
   });
+
+  it("does not expose an HTML proxy error to the interface", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("<html><h1>502 Bad Gateway</h1></html>", {
+          status: 502,
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    );
+
+    await expect(api.requestCode({ email: "person@example.com" })).rejects.toMatchObject({
+      code: "request_failed",
+      message: "ANTOLEX is temporarily unavailable. Please try again in a moment.",
+    });
+  });
 });

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/mail"
 	"net/smtp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -89,6 +90,73 @@ func isValidEmail(value string) bool {
 	return err == nil
 }
 
+func isValidAuthCode(value string) bool {
+	if len(value) != 6 {
+		return false
+	}
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func retryAfterSeconds(ttl time.Duration) int {
+	if ttl <= 0 {
+		return 0
+	}
+	return int((ttl + time.Second - 1) / time.Second)
+}
+
+func writeAuthRateLimit(
+	c *fiber.Ctx,
+	code string,
+	message string,
+	ttl time.Duration,
+	details map[string]any,
+) error {
+	if details == nil {
+		details = make(map[string]any)
+	}
+	seconds := retryAfterSeconds(ttl)
+	details["retry_after_seconds"] = seconds
+	if seconds > 0 {
+		c.Set(fiber.HeaderRetryAfter, strconv.Itoa(seconds))
+	}
+	return writeAPIError(c, fiber.StatusTooManyRequests, code, message, details)
+}
+
+func writeAuthUnavailable(c *fiber.Ctx) error {
+	return writeAPIError(
+		c,
+		fiber.StatusServiceUnavailable,
+		"auth_unavailable",
+		"Sign-in is temporarily unavailable. Try again in a moment.",
+		nil,
+	)
+}
+
+func writeAccessPending(c *fiber.Ctx) error {
+	return writeAPIError(
+		c,
+		fiber.StatusForbidden,
+		"access_pending",
+		"Your email is verified. Access now needs approval from the site owner. After approval, request a new sign-in code.",
+		map[string]any{"approval_required": true},
+	)
+}
+
+func writeAccessBlocked(c *fiber.Ctx) error {
+	return writeAPIError(
+		c,
+		fiber.StatusForbidden,
+		"access_blocked",
+		"Access for this account has been blocked by the site owner.",
+		nil,
+	)
+}
+
 func generateAuthCode() (string, error) {
 	max := big.NewInt(1000000)
 	value, err := rand.Int(rand.Reader, max)
@@ -109,29 +177,34 @@ func (s *Server) requestCode(c *fiber.Ctx) error {
 
 	var req requestCodeRequest
 	if err := c.BodyParser(&req); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		return writeAPIError(c, fiber.StatusBadRequest, "invalid_request_body", "We could not read this request. Refresh the page and try again.", nil)
 	}
 
 	email := normalizeEmail(req.Email)
 	if !isValidEmail(email) {
-		return fiber.NewError(fiber.StatusBadRequest, "valid email is required")
+		return writeAPIError(c, fiber.StatusBadRequest, "invalid_email", "Enter a valid email address.", nil)
 	}
 	reserved, err := s.redis.SetNX(ctx, authCooldownKey(email), "1", authResendDelay).Result()
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "failed to apply resend limit")
+		return writeAuthUnavailable(c)
 	}
 	if !reserved {
-		ttl := s.redis.TTL(ctx, authCooldownKey(email)).Val()
-		return writeAPIError(c, fiber.StatusTooManyRequests, "code_rate_limited", "Please wait before requesting another code", map[string]any{"retry_after_seconds": max(1, int(ttl.Seconds()))})
+		ttl := s.redis.PTTL(ctx, authCooldownKey(email)).Val()
+		if ttl <= 0 {
+			ttl = time.Second
+		}
+		return writeAuthRateLimit(c, "code_rate_limited", "A code was requested recently. Try again when the timer ends.", ttl, nil)
 	}
 
 	code, err := generateAuthCode()
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "failed to generate verification code")
+		_ = s.redis.Del(ctx, authCooldownKey(email)).Err()
+		return writeAuthUnavailable(c)
 	}
 
 	if err := s.redis.Set(ctx, authCodeKey(email), s.hashAuthCode(email, code), s.cfg.AuthCodeTTL).Err(); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "failed to store verification code")
+		_ = s.redis.Del(ctx, authCooldownKey(email)).Err()
+		return writeAuthUnavailable(c)
 	}
 	_ = s.redis.Del(ctx, authAttemptsKey(email)).Err()
 
@@ -142,8 +215,8 @@ func (s *Server) requestCode(c *fiber.Ctx) error {
 			c,
 			fiber.StatusServiceUnavailable,
 			"email_unavailable",
-			"Failed to send verification code",
-			map[string]any{"email": email},
+			"We could not send the code right now. Try again in a moment.",
+			nil,
 		)
 	}
 
@@ -155,49 +228,58 @@ func (s *Server) verifyCode(c *fiber.Ctx) error {
 
 	var req verifyCodeRequest
 	if err := c.BodyParser(&req); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		return writeAPIError(c, fiber.StatusBadRequest, "invalid_request_body", "We could not read this request. Refresh the page and try again.", nil)
 	}
 
 	email := normalizeEmail(req.Email)
 	code := strings.TrimSpace(req.Code)
-	if !isValidEmail(email) || len(code) != 6 {
-		return fiber.NewError(fiber.StatusBadRequest, "valid email and 6-digit code are required")
+	if !isValidEmail(email) {
+		return writeAPIError(c, fiber.StatusBadRequest, "invalid_email", "Enter a valid email address.", nil)
+	}
+	if !isValidAuthCode(code) {
+		return writeAPIError(c, fiber.StatusBadRequest, "invalid_code_format", "Enter the complete 6-digit code.", nil)
 	}
 
 	result, err := s.consumeAuthCode(ctx, email, s.hashAuthCode(email, code))
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "failed to verify code")
+		return writeAuthUnavailable(c)
 	}
 	if result == authCodeLocked {
-		return writeAPIError(c, fiber.StatusTooManyRequests, "too_many_code_attempts", "Too many verification attempts; request a new code", nil)
+		return writeAuthRateLimit(
+			c,
+			"too_many_code_attempts",
+			"Too many incorrect attempts. Request a new code.",
+			s.redis.PTTL(ctx, authCooldownKey(email)).Val(),
+			map[string]any{"request_new_code": true},
+		)
 	}
 	if result != authCodeConsumed {
 		return writeAPIError(
 			c,
 			fiber.StatusUnauthorized,
 			"invalid_code",
-			"Verification code is invalid or expired",
-			map[string]any{"email": email},
+			"That code is incorrect or has expired. Request a new code and try again.",
+			nil,
 		)
 	}
 
 	user, err := s.upsertVerifiedUser(ctx, email)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "failed to create user")
+		return writeAuthUnavailable(c)
 	}
 	switch user.AccessStatus {
 	case models.AccessStatusPending:
-		return writeAPIError(c, fiber.StatusForbidden, "access_pending", "Your account is waiting for owner approval. Once approved, request a new code.", nil)
+		return writeAccessPending(c)
 	case models.AccessStatusBlocked:
-		return writeAPIError(c, fiber.StatusForbidden, "access_blocked", "Your account has been blocked", nil)
+		return writeAccessBlocked(c)
 	case models.AccessStatusActive:
 	default:
-		return fiber.NewError(fiber.StatusInternalServerError, "invalid user access status")
+		return writeAuthUnavailable(c)
 	}
 
 	token, expiresAt, err := s.signToken(user.ID, user.Email)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "failed to create token")
+		return writeAuthUnavailable(c)
 	}
 	s.setSessionCookie(c, token, expiresAt)
 

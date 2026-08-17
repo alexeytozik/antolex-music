@@ -93,6 +93,7 @@ services:
       context: ./apps/web
       args:
         VITE_API_BASE_URL: /api/v1
+        VITE_HLS_PLAYBACK_ENABLED: ${HLS_PLAYBACK_ENABLED:-false}
     ports:
       - "127.0.0.1:5173:80"
     depends_on:

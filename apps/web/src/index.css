@@ -174,13 +174,23 @@ button { -webkit-tap-highlight-color: transparent; }
 .auth-wrap { min-height: calc(100dvh - 210px); display: grid; place-items: center; }
 .auth-card { width: 100%; max-width: 460px; display: grid; gap: 20px; }
 .auth-heading { display: flex; align-items: center; gap: 14px; }.auth-heading h1 { font-size: 1.2rem; letter-spacing: -.025em; }
+.auth-guidance { margin: 0; color: var(--muted); font-size: .86rem; line-height: 1.55; }
+.auth-guidance strong { color: #dbe2e0; }
+.auth-card .form-field { font-size: .82rem; }
 .auth-code-step { display: grid; gap: 13px; min-width: 0; }
+.auth-approval { display: grid; gap: 10px; padding: 15px; border-left: 3px solid var(--mint); background: rgba(46,230,184,.06); }
+.auth-approval p { margin: 0; color: var(--muted); font-size: .86rem; line-height: 1.55; }
+.auth-approval strong { color: var(--mint-soft); }
+.auth-approval .secondary-button { width: 100%; margin-top: 4px; }
+.auth-blocked { border-left-color: #ff8e98; background: rgba(255,90,105,.06); }
+.auth-blocked strong { color: #ffadb4; }
 .auth-email { min-width: 0; min-height: 48px; padding: 0 13px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: var(--radius-control); }
 .auth-email span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c3cac8; font-size: .75rem; }
-.auth-email button, .resend-button { min-height: 44px; border: 0; color: var(--mint); background: transparent; font-size: .7rem; }
+.auth-email button, .resend-button { min-height: 44px; border: 0; color: var(--mint); background: transparent; font-size: .8rem; }
 .otp-grid { width: 100%; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: clamp(4px, 2vw, 9px); }
 .otp-grid input { width: 100%; min-width: 0; aspect-ratio: .78; max-height: 68px; border: 1px solid var(--line); border-radius: 8px; outline: 0; text-align: center; background: #090d0e; color: white; font-size: clamp(1rem, 5vw, 1.3rem); font-weight: 750; }
 .otp-grid input:focus { border-color: var(--mint); box-shadow: 0 0 0 3px rgba(46,230,184,.08); }
+.auth-card .notice { font-size: .84rem; line-height: 1.45; }
 .resend-button { justify-self: start; padding: 0; }.auth-submit { width: 100%; }
 
 .mobile-player-ui { display: contents; }

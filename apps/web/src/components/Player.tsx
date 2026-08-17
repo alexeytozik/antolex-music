@@ -13,6 +13,7 @@ import {
 } from "./Icons";
 import { api } from "../lib/api";
 import { formatDuration } from "../lib/format";
+import { usePlaybackSessionDriver } from "../hooks/use-playback-session-driver";
 import {
   classifyMediaError,
   isAbortError,
@@ -63,8 +64,8 @@ export function Player() {
       continuation.hasMore &&
       Boolean(continuation.cursor),
   );
-  const hasNext = hasPlayerNext || hasContinuationNext;
-  const hasPrevious = usePlayerStore(selectHasPrevious);
+  const progressiveHasNext = hasPlayerNext || hasContinuationNext;
+  const progressiveHasPrevious = usePlayerStore(selectHasPrevious);
   const isPlaying = usePlayerStore((state) => state.isPlaying);
   const status = usePlayerStore((state) => state.status);
   const queueLength = usePlayerStore((state) => state.queue.length);
@@ -91,6 +92,21 @@ export function Player() {
   const setProgress = usePlayerStore((state) => state.setPlaybackProgress);
   const trackEnded = usePlayerStore((state) => state.handleTrackEnded);
   const playbackError = usePlayerStore((state) => state.handlePlaybackError);
+
+  const sessionDriver = usePlaybackSessionDriver({
+    audioRef,
+    currentItem,
+    queueContextId: playerQueueContextId,
+    isPlaying,
+  });
+  const hasNext = sessionDriver.isHLS
+    ? Boolean(
+        sessionDriver.session?.has_more || currentIndex + 1 < queueLength,
+      )
+    : progressiveHasNext;
+  const hasPrevious = sessionDriver.isHLS
+    ? currentTime > 3 || currentIndex > 0
+    : progressiveHasPrevious;
 
   const track = useMemo(() => currentItem ? {
     ...currentItem.track,
@@ -312,12 +328,13 @@ export function Player() {
   }, [isPlaying]);
 
   useEffect(() => {
+    if (sessionDriver.isHLS) return;
     if (!shuffle || currentIndex < 0 || queueLength - currentIndex > 3) return;
     void prefetchShuffle();
     const resumeShuffle = () => { void prefetchShuffle(); };
     window.addEventListener("online", resumeShuffle);
     return () => window.removeEventListener("online", resumeShuffle);
-  }, [currentIndex, prefetchShuffle, queueLength, shuffle]);
+  }, [currentIndex, prefetchShuffle, queueLength, sessionDriver.isHLS, shuffle]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -337,6 +354,7 @@ export function Player() {
   }, [expanded]);
 
   useEffect(() => {
+    if (sessionDriver.blocksProgressive) return;
     if (!currentItem || currentItem.resolveStatus === "loading") return;
     if (isQueueItemStreamFresh(currentItem) && currentItem.resolveStatus === "ready") return;
     if (!isPlaying || recoveryRef.current || resolveAbortRef.current) return;
@@ -351,11 +369,18 @@ export function Player() {
       },
       status === "retrying",
     );
-  }, [currentItem, currentTime, isPlaying, status]);
+  }, [
+    currentItem,
+    currentTime,
+    isPlaying,
+    sessionDriver.blocksProgressive,
+    status,
+  ]);
 
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
+    if (sessionDriver.blocksProgressive) return;
     if (!currentItem || !track?.stream_url) {
       audio.pause();
       if (!currentItem) {
@@ -379,17 +404,27 @@ export function Player() {
       audio.src = track.stream_url;
       audio.load();
     }
-  }, [currentItem, track?.stream_url]);
+  }, [currentItem, sessionDriver.blocksProgressive, track?.stream_url]);
 
   useEffect(() => {
     const audio = audioRef.current;
-    if (!audio || !track?.stream_url) return;
+    const hlsSessionID = sessionDriver.session?.id;
+    if (
+      !audio ||
+      (sessionDriver.isHLS
+        ? !hlsSessionID || audio.dataset.playbackSessionId !== hlsSessionID
+        : !track?.stream_url)
+    ) {
+      return;
+    }
     const requestedQueueId = currentItem?.queueId;
     if (isPlaying) {
       void audio.play().then(() => {
         const player = usePlayerStore.getState();
         if (
-          selectCurrentItem(player)?.queueId !== requestedQueueId ||
+          (sessionDriver.isHLS
+            ? audio.dataset.playbackSessionId !== hlsSessionID
+            : selectCurrentItem(player)?.queueId !== requestedQueueId) ||
           !player.isPlaying
         ) {
           return;
@@ -398,7 +433,9 @@ export function Player() {
       }).catch((reason) => {
         const player = usePlayerStore.getState();
         if (
-          selectCurrentItem(player)?.queueId !== requestedQueueId ||
+          (sessionDriver.isHLS
+            ? audio.dataset.playbackSessionId !== hlsSessionID
+            : selectCurrentItem(player)?.queueId !== requestedQueueId) ||
           !player.isPlaying ||
           isAbortError(reason)
         ) {
@@ -407,6 +444,13 @@ export function Player() {
         if (reason instanceof DOMException && reason.name === "NotAllowedError") {
           cancelRecovery();
           setPlaybackStatus("paused", "Tap play to continue");
+          return;
+        }
+        if (sessionDriver.isHLS && isRetryablePlaybackRequestError(reason)) {
+          setPlaybackStatus(
+            "retrying",
+            playbackErrorMessage(reason, "Connection lost during playback"),
+          );
           return;
         }
         if (isRetryablePlaybackRequestError(reason)) {
@@ -425,16 +469,19 @@ export function Player() {
     currentItem?.queueId,
     currentItem?.resolvedAt,
     isPlaying,
+    sessionDriver.isHLS,
+    sessionDriver.session?.id,
     setPlaybackStatus,
     track?.stream_url,
   ]);
 
   useEffect(() => {
     const audio = audioRef.current;
+    if (sessionDriver.isHLS) return;
     if (!audio || seekTarget === null || audio.readyState < 1) return;
     audio.currentTime = Math.min(seekTarget, Number.isFinite(audio.duration) ? audio.duration : seekTarget);
     clearSeekRequest();
-  }, [clearSeekRequest, seekTarget, status]);
+  }, [clearSeekRequest, seekTarget, sessionDriver.isHLS, status]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator) || !track) return;
@@ -447,15 +494,15 @@ export function Player() {
     const handlers: Array<[MediaSessionAction, MediaSessionActionHandler]> = [
       ["play", () => { if (!usePlayerStore.getState().isPlaying) togglePlayback(); }],
       ["pause", () => { if (usePlayerStore.getState().isPlaying) togglePlayback(); }],
-      ["previoustrack", previous],
-      ["nexttrack", () => { void next(); }],
-      ["seekto", (details) => { if (typeof details.seekTime === "number") seek(details.seekTime); }],
-      ["seekbackward", (details) => seek(Math.max(0, usePlayerStore.getState().currentTime - (details.seekOffset ?? 10)))],
-      ["seekforward", (details) => seek(Math.min(usePlayerStore.getState().duration, usePlayerStore.getState().currentTime + (details.seekOffset ?? 10)))],
+      ["previoustrack", () => { previousTrack(); }],
+      ["nexttrack", () => { void nextTrack(); }],
+      ["seekto", (details) => { if (typeof details.seekTime === "number") seekTrack(details.seekTime); }],
+      ["seekbackward", (details) => seekTrack(Math.max(0, usePlayerStore.getState().currentTime - (details.seekOffset ?? 10)))],
+      ["seekforward", (details) => seekTrack(Math.min(usePlayerStore.getState().duration, usePlayerStore.getState().currentTime + (details.seekOffset ?? 10)))],
     ];
     handlers.forEach(([action, handler]) => { try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* Unsupported action. */ } });
     return () => handlers.forEach(([action]) => { try { navigator.mediaSession.setActionHandler(action, null); } catch { /* Unsupported action. */ } });
-  }, [next, previous, seek, togglePlayback, track]);
+  }, [sessionDriver.isHLS, togglePlayback, track]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
@@ -466,6 +513,10 @@ export function Player() {
   }, [currentTime, displayDuration, isPlaying]);
 
   function updateProgress() {
+    if (sessionDriver.isHLS) {
+      sessionDriver.syncTimeline();
+      return;
+    }
     const audio = audioRef.current;
     const item = selectCurrentItem(usePlayerStore.getState());
     if (!audio || !item || audio.dataset.queueId !== item.queueId) return;
@@ -476,6 +527,10 @@ export function Player() {
   }
   function loaded() {
     const audio = audioRef.current;
+    if (sessionDriver.isHLS) {
+      sessionDriver.syncTimeline();
+      return;
+    }
     const item = selectCurrentItem(usePlayerStore.getState());
     if (!audio || !item || audio.dataset.queueId !== item.queueId) return;
     if (seekTarget !== null) { audio.currentTime = Math.min(seekTarget, audio.duration); clearSeekRequest(); }
@@ -485,11 +540,13 @@ export function Player() {
     const audio = audioRef.current;
     const player = usePlayerStore.getState();
     const item = selectCurrentItem(player);
+    if (!audio || !item || !player.isPlaying) {
+      return;
+    }
     if (
-      !audio ||
-      !item ||
-      audio.dataset.queueId !== item.queueId ||
-      !player.isPlaying
+      sessionDriver.isHLS
+        ? audio.dataset.playbackSessionId !== sessionDriver.session?.id
+        : audio.dataset.queueId !== item.queueId
     ) {
       return;
     }
@@ -497,6 +554,7 @@ export function Player() {
     setPlaybackStatus("playing");
   }
   function onError() {
+    if (sessionDriver.handleMediaError()) return;
     const audio = audioRef.current;
     const item = selectCurrentItem(usePlayerStore.getState());
     if (!audio || !item || audio.dataset.queueId !== item.queueId) return;
@@ -511,6 +569,7 @@ export function Player() {
     finishRecovery(message);
   }
   function onEnded() {
+    if (sessionDriver.handleEnded()) return;
     const audio = audioRef.current;
     const player = usePlayerStore.getState();
     const item = selectCurrentItem(player);
@@ -524,6 +583,27 @@ export function Player() {
     }
     trackEnded();
   }
+  function seekTrack(seconds: number) {
+    if (sessionDriver.isHLS) {
+      sessionDriver.seekLocal(seconds);
+      return;
+    }
+    seek(seconds);
+  }
+  async function nextTrack() {
+    if (sessionDriver.isHLS) {
+      await sessionDriver.nextTrack();
+      return;
+    }
+    await next();
+  }
+  function previousTrack() {
+    if (sessionDriver.isHLS) {
+      sessionDriver.previousTrack();
+      return;
+    }
+    previous();
+  }
   function changeVolume(value: number) {
     setVolume(value);
     if (muted) setMuted(false);
@@ -531,7 +611,7 @@ export function Player() {
 
   return (
     <>
-      <audio ref={audioRef} preload="metadata" onLoadedMetadata={loaded} onPlaying={onPlaying} onTimeUpdate={updateProgress} onProgress={updateProgress} onEnded={onEnded} onError={onError} />
+      <audio ref={audioRef} preload="auto" onLoadedMetadata={loaded} onPlaying={onPlaying} onTimeUpdate={updateProgress} onProgress={updateProgress} onEnded={onEnded} onError={onError} />
       <div className="mobile-player-ui">
         {track && (
           <div className="mini-player">
@@ -541,7 +621,7 @@ export function Player() {
               {(status === "resolving" || status === "retrying") && <SpinnerIcon className="h-5 w-5 animate-spin" />}
             </button>
             <button className="player-button" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"} aria-keyshortcuts="Space">{isPlaying ? <PauseIcon className="h-6 w-6" /> : <PlayIcon className="h-6 w-6" />}</button>
-            <button className="player-button mobile-next" type="button" onClick={() => { void next(); }} disabled={!hasNext} aria-label="Next track"><NextIcon className="h-6 w-6" /></button>
+            <button className="player-button mobile-next" type="button" onClick={() => { void nextTrack(); }} disabled={!hasNext} aria-label="Next track"><NextIcon className="h-6 w-6" /></button>
             <div className="mini-progress"><span style={{ width: `${progressPercent}%` }} /></div>
           </div>
         )}
@@ -552,12 +632,12 @@ export function Player() {
             <div className="full-player-content">
               <img className="full-cover" src={track.cover_url || "/cover-fallback.svg"} alt="" onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = "/cover-fallback.svg"; }} />
               <div className="full-track-copy"><h2>{track.title}</h2><p>{track.artist}{track.album ? ` · ${track.album}` : ""}</p></div>
-              <div className="full-scrubber"><input aria-label="Track position" type="range" min="0" max={displayDuration || 0} step="1" value={progress} onChange={(event) => seek(Number(event.target.value))} /><div><span>{formatDuration(Math.floor(progress))}</span><span>{formatDuration(Math.floor(displayDuration))}</span></div></div>
+              <div className="full-scrubber"><input aria-label="Track position" type="range" min="0" max={displayDuration || 0} step="1" value={progress} onChange={(event) => seekTrack(Number(event.target.value))} /><div><span>{formatDuration(Math.floor(progress))}</span><span>{formatDuration(Math.floor(displayDuration))}</span></div></div>
               <div className="full-controls">
                 <button className={`player-button ${shuffle ? "active" : ""}`} type="button" onClick={() => setShuffle(!shuffle)} aria-label="Shuffle" aria-pressed={shuffle}><ShuffleIcon className="h-6 w-6" /></button>
-                <button className="player-button" type="button" onClick={previous} disabled={!hasPrevious} aria-label="Previous"><PreviousIcon className="h-7 w-7" /></button>
+                <button className="player-button" type="button" onClick={previousTrack} disabled={!hasPrevious} aria-label="Previous"><PreviousIcon className="h-7 w-7" /></button>
                 <button ref={fullPlayRef} className="play-main" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"} aria-keyshortcuts="Space">{isPlaying ? <PauseIcon className="h-8 w-8" /> : <PlayIcon className="h-8 w-8" />}</button>
-                <button className="player-button" type="button" onClick={() => { void next(); }} disabled={!hasNext} aria-label="Next"><NextIcon className="h-7 w-7" /></button>
+                <button className="player-button" type="button" onClick={() => { void nextTrack(); }} disabled={!hasNext} aria-label="Next"><NextIcon className="h-7 w-7" /></button>
                 <span className="control-spacer" />
               </div>
               <label className="volume-control"><VolumeIcon className="h-5 w-5" /><span className="sr-only">Volume</span><input type="range" min="0" max="1" step="0.01" value={volume} onChange={(event) => changeVolume(Number(event.target.value))} /></label>
@@ -581,9 +661,9 @@ export function Player() {
 
             <div className="desktop-player-controls">
               <button className={`player-button ${shuffle ? "active" : ""}`} type="button" onClick={() => setShuffle(!shuffle)} disabled={!track} aria-label="Shuffle" aria-pressed={shuffle}><ShuffleIcon className="h-6 w-6" /></button>
-              <button className="player-button outlined" type="button" onClick={previous} disabled={!hasPrevious} aria-label="Previous"><PreviousIcon className="h-6 w-6" /></button>
+              <button className="player-button outlined" type="button" onClick={previousTrack} disabled={!hasPrevious} aria-label="Previous"><PreviousIcon className="h-6 w-6" /></button>
               <button className="play-main desktop-play-main" type="button" onClick={togglePlayback} disabled={!track} aria-label={isPlaying ? "Pause" : "Play"} aria-keyshortcuts="Space">{isPlaying ? <PauseIcon className="h-7 w-7" /> : <PlayIcon className="h-7 w-7" />}</button>
-              <button className="player-button outlined" type="button" onClick={() => { void next(); }} disabled={!hasNext} aria-label="Next"><NextIcon className="h-6 w-6" /></button>
+              <button className="player-button outlined" type="button" onClick={() => { void nextTrack(); }} disabled={!hasNext} aria-label="Next"><NextIcon className="h-6 w-6" /></button>
             </div>
 
             <div className="desktop-volume">
@@ -596,7 +676,7 @@ export function Player() {
             <div className="desktop-progress-rail">
               <span className="desktop-progress-buffer" style={{ width: `${bufferedPercent}%` }} />
               <span className="desktop-progress-played" style={{ width: `${progressPercent}%` }} />
-              <input aria-label="Track position" type="range" min="0" max={displayDuration || 0} step="1" value={progress} disabled={!track || displayDuration <= 0} onChange={(event) => seek(Number(event.target.value))} />
+              <input aria-label="Track position" type="range" min="0" max={displayDuration || 0} step="1" value={progress} disabled={!track || displayDuration <= 0} onChange={(event) => seekTrack(Number(event.target.value))} />
             </div>
             <div><span>{formatDuration(Math.floor(progress))}</span><span>{track ? formatDuration(Math.floor(displayDuration)) : "--:--"}</span></div>
           </div>

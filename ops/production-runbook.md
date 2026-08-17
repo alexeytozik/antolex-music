@@ -26,7 +26,7 @@ if [[ ! -e /home/atozik/antolex-music/shared/.env ]]; then
 fi
 ```
 
-Fill `/home/atozik/antolex-music/shared/.env` from `.env.example`. Explicitly set `APP_ENV=production`, `SESSION_COOKIE_SECURE=true`, `ADMIN_EMAILS=tozikalexey@gmail.com`, and a random `JWT_SECRET` of at least 32 characters. If the prior release used another JWT secret, put it temporarily in `LEGACY_JWT_SECRET` so old localStorage sessions can exchange once; remove it after the migration window. Set the same strong database credentials in `POSTGRES_*`, `COMPOSE_DATABASE_URL`, and `DATABASE_URL`, URL-encoding special characters. Never paste this file into Actions logs or tickets.
+Fill `/home/atozik/antolex-music/shared/.env` from `.env.example`. Explicitly set `APP_ENV=production`, `SESSION_COOKIE_SECURE=true`, `ADMIN_EMAILS=tozikalexey@gmail.com`, `HLS_PLAYBACK_ENABLED=false`, and a random `JWT_SECRET` of at least 32 characters. If the prior release used another JWT secret, put it temporarily in `LEGACY_JWT_SECRET` so old localStorage sessions can exchange once; remove it after the migration window. Set the same strong database credentials in `POSTGRES_*`, `COMPOSE_DATABASE_URL`, and `DATABASE_URL`, URL-encoding special characters. Never paste this file into Actions logs or tickets.
 
 If an existing deployment lives elsewhere, copy its `.env` into `shared/.env`, verify mode `600`, and point `current` at that exact old release before the first workflow deployment. This gives the workflow an automatic application rollback target:
 
@@ -92,6 +92,23 @@ post-copy SHA-256 verification exactly as documented in
 
 A push to `main`, or a manual `workflow_dispatch` explicitly run from `main`, deploys only after all three checks pass. Production deployments are serialized and never cancel an active deployment.
 
+Regular pushes leave `HLS_PLAYBACK_ENABLED` in the shared production environment
+unchanged. For a staged manual deployment, select `keep`, `false`, or `true` in
+the Actions form. The equivalent CLI command for the initial fallback-only
+release is:
+
+```bash
+gh workflow run ci-deploy.yml \
+  --repo AlexeyTozik/antolex-music \
+  --ref main \
+  -f hls_playback_enabled=false
+```
+
+The workflow validates the value and atomically changes only
+`HLS_PLAYBACK_ENABLED` in `shared/.env`, preserving mode `600`, immediately
+before the remote Compose build. The `keep` choice performs no environment
+write.
+
 The deploy job uses only the system `ssh` and `scp` clients. It verifies the pinned host key, uploads a SHA-256-checked `git archive`, extracts a unique release directory, links the shared `.env`, and validates Compose. If an `antolex-music` PostgreSQL container already exists, deployment stops unless it is running.
 
 The workflow then runs `sudo docker compose --profile production up -d --build --remove-orphans` and waits up to five minutes for all of these checks:
@@ -103,6 +120,91 @@ The workflow then runs `sudo docker compose --profile production up -d --build -
 Only then is `current` atomically switched to the new release. On failure it keeps the old symlink and, when an older release is known, attempts to restore that release's Compose stack. Failed release directories remain available for diagnosis.
 
 After a successful deployment, verify the Actions run and then check a sign-in flow on one iPhone and one Android phone: request/resend code, search, like, upload a small file, wait for processing, play with the screen locked, and use headset play/pause/next controls.
+
+## Staged HLS rollout
+
+The HLS transport is deliberately enabled in two releases. Keep
+`HLS_PLAYBACK_ENABLED=false` for the first release. Migration `0009` is applied
+idempotently by both API and worker under the migration advisory lock, and the
+worker then creates bounded-retry `prepare_hls` jobs for the existing ready
+library. Users continue to receive the progressive M4A player during this
+stage.
+
+Monitor the structured worker errors and run this read-only readiness query
+from the active release:
+
+```bash
+root=/home/atozik/antolex-music
+cd "$root/current"
+sudo docker compose \
+  --env-file "$root/shared/.env" \
+  --profile production exec -T postgres \
+  sh -ec 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+SELECT
+  (SELECT COUNT(*) FROM library_tracks WHERE status='ready') AS ready_tracks,
+  (SELECT COUNT(*)
+     FROM library_tracks track
+    WHERE track.status='ready'
+      AND EXISTS (
+        SELECT 1 FROM track_playback_assets asset
+         WHERE asset.track_id=track.id
+           AND asset.status='ready'
+           AND asset.retired_at IS NULL
+      )) AS hls_ready,
+  (SELECT COUNT(*)
+     FROM library_tracks track
+    WHERE track.status='ready'
+      AND NOT EXISTS (
+        SELECT 1 FROM track_playback_assets asset
+         WHERE asset.track_id=track.id
+           AND asset.status='ready'
+           AND asset.retired_at IS NULL
+      )) AS hls_missing,
+  (SELECT COUNT(*)
+     FROM library_tracks track
+    WHERE track.status='ready'
+      AND NOT EXISTS (
+        SELECT 1 FROM track_playback_assets asset
+         WHERE asset.track_id=track.id
+           AND asset.status='ready'
+           AND asset.retired_at IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM media_jobs job
+         WHERE job.track_id=track.id
+           AND job.kind='prepare_hls'
+           AND job.status='failed'
+           AND job.attempts >= 6
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM media_jobs job
+         WHERE job.track_id=track.id
+           AND job.kind='prepare_hls'
+           AND job.status IN ('pending','running')
+      )) AS hls_failed;
+SQL
+```
+
+Do not enable HLS until `hls_ready = ready_tracks`, `hls_missing = 0`, and
+`hls_failed = 0`. Spot-check the generated CMAF objects and a three-track HLS
+session, then run the second staged deployment so Vite bakes the flag into the
+web image:
+
+```bash
+gh workflow run ci-deploy.yml \
+  --repo AlexeyTozik/antolex-music \
+  --ref main \
+  -f hls_playback_enabled=true
+```
+
+Validate iOS Safari and Android Chrome with the screen locked before treating
+the rollout as complete.
+
+The rollout does not delete progressive M4A objects. Keep them for fallback and
+rollback until a separate dry-run lists exact object keys and the owner gives
+explicit deletion approval. Migration rollback is not automatic; if an
+application rollback is needed after `0009` has run, inspect `prepare_hls` jobs
+before starting a worker release that predates that job kind.
 
 ## Rollback
 

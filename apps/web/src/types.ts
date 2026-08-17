@@ -41,6 +41,39 @@ export type ShuffleResponse = {
   cycle_complete: boolean;
 };
 
+export type PlaybackSessionSource =
+  | { kind: "search"; query: string }
+  | { kind: "likes" }
+  | { kind: "shuffle"; exclude_external_id?: string };
+
+export type CreatePlaybackSessionInput = {
+  source: PlaybackSessionSource;
+  initial_external_ids: string[];
+  current_external_id: string;
+  current_index: number;
+  position_seconds: number;
+  cursor?: string | null;
+  page: number;
+  has_more: boolean;
+};
+
+export type PlaybackSessionItem = {
+  ordinal: number;
+  track: Track;
+  timeline_start_ms: number;
+  duration_ms: number;
+};
+
+export type PlaybackSession = {
+  id: string;
+  revision: number;
+  manifest_url: string;
+  expires_at: string;
+  start_offset_seconds: number;
+  items: PlaybackSessionItem[];
+  has_more: boolean;
+};
+
 export type User = {
   id: string;
   email: string;

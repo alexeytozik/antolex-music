@@ -26,6 +26,7 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 18. Keep the upload queue and its one-at-a-time processor mounted for the authenticated application lifetime instead of tying them to the Add route. Internal navigation must retain selected `File` handles and continue hashing/uploading/processing; a full browser reload still restores durable metadata as `needs_file`. Reconcile reselected files with existing `needs_file` rows before enforcing the 50-file capacity so a full batch can resume in one selection. Scope IndexedDB metadata to the authenticated user, stop local work immediately on logout, and use abortable single-flight processing polls so stale or unauthorized responses cannot cross account/session boundaries.
 19. Replace contiguous `LIKE` catalog search with PostgreSQL `simple` full-text search plus `pg_trgm`: accent-insensitive weighted metadata search, order-independent prefix terms, a typo-only fallback, stable versioned cursors, and matching frontend continuation invalidation without adding a separate search service.
 20. Restore owner-managed access without restoring product roles: `ADMIN_EMAILS` identifies protected administrators, newly verified accounts start as pending, existing accounts retain their current access, and an owner-only responsive `/admin` page can approve or block users. Blocked sessions lose API access immediately; administrators cannot block themselves or another configured administrator.
+21. Replace JavaScript-driven per-track source swaps with a server-backed continuous HLS queue for normal mobile screen-lock/background playback. Package each track as one byte-range CMAF/fMP4 asset, extend search/liked/shuffle queues on the server beyond the first 20 tracks, keep one stable media source across automatic boundaries, and retain progressive playback until the existing library is fully backfilled and validated.
 
 ## Production consolidation (completed)
 
@@ -38,7 +39,7 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 
 ## Current local status
 
-- Milestones 1–20 are implemented locally; final verification is repeated after each production change.
+- Milestones 1–21 are implemented locally; final verification is repeated after each production change.
 - The six confirmed legacy duplicates and the Cover Test track were removed through guarded worker jobs after explicit approval; the library has no unresolved hashes or exact SHA-256 duplicate groups.
 - The `antolex-music` R2 bucket is created, scoped credentials and CORS are configured, all 13 legacy objects are copied, and key/size plus full SHA-256 verification passed. The local API and worker now use the new bucket; the old bucket remains intact for the required seven-day rollback window.
 - `antolex.net` is an active Mailjet sending domain with SPF, DKIM, and DMARC published in Cloudflare. Local sign-in email now comes from `ANTOLEX Music <auth@antolex.net>` and was verified in Gmail Inbox.
@@ -60,4 +61,4 @@ Turn the current Tozikron Music prototype into a mobile-first ANTOLEX Music web 
 
 ## Explicit v1 boundaries
 
-No PWA/service worker, native shell, offline audio, ZIP/URL/cloud imports, automatic bucket scanning, audio similarity/AI matching, or playback modes beyond shuffle.
+No PWA/service worker, native shell, offline audio, ZIP/URL/cloud imports, automatic bucket scanning, audio similarity/AI matching, or playback modes beyond shuffle. Audio-only HLS/CMAF is explicitly allowed as the web background-playback transport; it does not change the no-native-app boundary.

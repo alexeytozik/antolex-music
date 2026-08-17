@@ -383,6 +383,12 @@ describe('player store queue session', () => {
     store.getState().replaceQueue(tracks, 5_000, false);
     const originalQueueContextId = store.getState().queueContextId;
     store.getState().setPlaybackProgress(75, 180, 90);
+    store.getState().setPlaybackSession(
+      'session-long-queue',
+      originalQueueContextId,
+      75,
+      { kind: 'search', query: 'long queue' },
+    );
 
     const raw = await storage.getItem(storageKey);
     expect(typeof raw).toBe('string');
@@ -403,6 +409,11 @@ describe('player store queue session', () => {
     expect(restored.getState().queueContextId).not.toBe(originalQueueContextId);
     expect(restored.getState().queue).toHaveLength(121);
     expect(restored.getState().currentIndex).toBe(40);
+    expect(restored.getState().playbackSessionId).toBe('session-long-queue');
+    expect(restored.getState().playbackSessionQueueContextId).toBe(
+      restored.getState().queueContextId,
+    );
+    expect(restored.getState().playbackTimelineTime).toBe(75);
   });
 
   it('enables global shuffle without restarting the current track', async () => {

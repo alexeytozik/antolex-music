@@ -130,8 +130,8 @@ func TestMigrateBackfillsLegacyLikesAndIsIdempotent(t *testing.T) {
 	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM track_likes WHERE user_id=$1 AND track_id=$2`, userID, trackID).Scan(&likeCount); err != nil {
 		t.Fatalf("count migrated likes: %v", err)
 	}
-	if migrationCount != 8 || likeCount != 1 {
-		t.Fatalf("migration rows=%d migrated likes=%d; want 8 and 1", migrationCount, likeCount)
+	if migrationCount != 9 || likeCount != 1 {
+		t.Fatalf("migration rows=%d migrated likes=%d; want 9 and 1", migrationCount, likeCount)
 	}
 
 	var blockedAccessStatus string
@@ -246,6 +246,71 @@ func TestMigrateBackfillsLegacyLikesAndIsIdempotent(t *testing.T) {
 	}
 
 	assertFullTextSearchSchema(t, ctx, db)
+	assertHLSPlaybackSchema(t, ctx, db, trackID)
+}
+
+func assertHLSPlaybackSchema(t *testing.T, ctx context.Context, db *pgxpool.Pool, legacyTrackID string) {
+	t.Helper()
+
+	var backfillJobs int
+	if err := db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM media_jobs
+		WHERE track_id=$1 AND kind='prepare_hls' AND status='pending'
+	`, legacyTrackID).Scan(&backfillJobs); err != nil {
+		t.Fatalf("count HLS backfill jobs: %v", err)
+	}
+	if backfillJobs != 1 {
+		t.Fatalf("HLS backfill jobs=%d; want 1", backfillJobs)
+	}
+
+	for _, indexName := range []string{
+		"idx_track_playback_assets_current_track",
+		"idx_track_playback_assets_retired_cleanup",
+		"idx_playback_sessions_user_access",
+		"idx_playback_sessions_expiry",
+		"idx_playback_session_items_media_sequence",
+		"idx_playback_session_items_cycle_track",
+	} {
+		var stored string
+		if err := db.QueryRow(ctx, `
+			SELECT indexname FROM pg_indexes
+			WHERE schemaname=current_schema() AND indexname=$1
+		`, indexName).Scan(&stored); err != nil {
+			t.Fatalf("load HLS index %s: %v", indexName, err)
+		}
+	}
+
+	var cycleDefault string
+	if err := db.QueryRow(ctx, `
+		SELECT column_default
+		FROM information_schema.columns
+		WHERE table_schema=current_schema()
+		  AND table_name='playback_session_items'
+		  AND column_name='cycle_no'
+	`).Scan(&cycleDefault); err != nil {
+		t.Fatalf("load playback cycle default: %v", err)
+	}
+	if cycleDefault != "0" {
+		t.Fatalf("playback cycle default=%q; want 0", cycleDefault)
+	}
+
+	for constraintName, expectedAction := range map[string]string{
+		"track_playback_assets_track_id_fkey":      "ON DELETE SET NULL",
+		"playback_session_items_track_id_fkey":     "ON DELETE SET NULL",
+		"playback_session_items_hls_asset_id_fkey": "ON DELETE RESTRICT",
+	} {
+		var definition string
+		if err := db.QueryRow(ctx, `
+			SELECT pg_get_constraintdef(oid)
+			FROM pg_constraint
+			WHERE conname=$1 AND connamespace=current_schema()::regnamespace
+		`, constraintName).Scan(&definition); err != nil {
+			t.Fatalf("load HLS constraint %s: %v", constraintName, err)
+		}
+		if !strings.Contains(definition, expectedAction) {
+			t.Fatalf("HLS constraint %s=%q; want %s", constraintName, definition, expectedAction)
+		}
+	}
 }
 
 func assertFullTextSearchSchema(t *testing.T, ctx context.Context, db *pgxpool.Pool) {

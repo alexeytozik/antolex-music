@@ -153,6 +153,33 @@ func (c *seedCatalog) DownloadObject(ctx context.Context, objectKey string) (io.
 	return result.Body, nil
 }
 
+type rangedObjectMetadata struct {
+	ContentType string
+	ETag        string
+}
+
+func (c *seedCatalog) DownloadObjectRange(
+	ctx context.Context,
+	objectKey string,
+	rangeHeader string,
+) (io.ReadCloser, rangedObjectMetadata, error) {
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(objectKey),
+	}
+	if strings.TrimSpace(rangeHeader) != "" {
+		input.Range = aws.String(rangeHeader)
+	}
+	result, err := c.client.GetObject(ctx, input)
+	if err != nil {
+		return nil, rangedObjectMetadata{}, err
+	}
+	return result.Body, rangedObjectMetadata{
+		ContentType: aws.ToString(result.ContentType),
+		ETag:        aws.ToString(result.ETag),
+	}, nil
+}
+
 func (c *seedCatalog) UploadObject(
 	ctx context.Context,
 	objectKey string,

@@ -152,6 +152,31 @@ describe("queue continuation", () => {
     expect(usePlayerStore.getState().queue).toHaveLength(22);
   });
 
+  it("leaves continuation to the server while an HLS session owns the queue", async () => {
+    const initialTracks = Array.from({ length: 20 }, (_, index) =>
+      track(`track-${index + 1}`),
+    );
+    usePlayerStore.getState().replaceQueue(initialTracks, 15, true);
+    const queueContextId = usePlayerStore.getState().queueContextId;
+    startQueueContinuation({
+      source: { kind: "search", query: "" },
+      cursor: "cursor-20",
+      page: 1,
+      hasMore: true,
+      queueContextId,
+    });
+    usePlayerStore
+      .getState()
+      .setPlaybackSession("session-1", queueContextId, 0);
+    const search = vi.spyOn(api, "searchWithCursor");
+
+    mountContinuation();
+    await flushContinuation();
+
+    expect(search).not.toHaveBeenCalled();
+    expect(usePlayerStore.getState().queue).toHaveLength(20);
+  });
+
   it("retries a transient page failure and keeps the queue moving", async () => {
     vi.useFakeTimers();
     const initialTracks = Array.from({ length: 20 }, (_, index) =>

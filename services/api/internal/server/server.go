@@ -95,7 +95,7 @@ func newApp(s *Server) *fiber.App {
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     strings.Join(s.cfg.CORSOrigins, ","),
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
-		AllowMethods:     "GET,POST,PATCH,DELETE,OPTIONS",
+		AllowMethods:     "GET,HEAD,POST,PATCH,DELETE,OPTIONS",
 		AllowCredentials: true,
 	}))
 
@@ -118,6 +118,13 @@ func newApp(s *Server) *fiber.App {
 	secured.Delete("/me/likes/:externalID", s.removeLike)
 	secured.Get("/admin/users", s.adminMiddleware, s.listAdminUsers)
 	secured.Patch("/admin/users/:id", s.adminMiddleware, s.updateAdminUserStatus)
+	playbackSessions := secured.Group("/me/playback-sessions")
+	playbackSessions.Post("", s.createPlaybackSession)
+	playbackSessions.Get("/:id", s.getPlaybackSession)
+	playbackSessions.Delete("/:id", s.deletePlaybackSession)
+	playbackSessions.Get("/:id/index.m3u8", s.playbackManifest)
+	playbackSessions.Get("/:id/assets/:revision/:ordinal.mp4", s.playbackAsset)
+	playbackSessions.Head("/:id/assets/:revision/:ordinal.mp4", s.playbackAsset)
 	uploads := secured.Group("/me/uploads")
 	uploads.Post("", s.createUpload)
 	uploads.Get("", s.listUploads)
@@ -443,10 +450,10 @@ func (s *Server) authenticateRequest(c *fiber.Ctx, allowLegacyExchange bool) err
 	switch user.AccessStatus {
 	case models.AccessStatusPending:
 		s.clearSessionCookie(c)
-		return writeAPIError(c, fiber.StatusForbidden, "access_pending", "Your account is waiting for owner approval. Once approved, request a new code.", nil)
+		return writeAccessPending(c)
 	case models.AccessStatusBlocked:
 		s.clearSessionCookie(c)
-		return writeAPIError(c, fiber.StatusForbidden, "access_blocked", "Your account has been blocked", nil)
+		return writeAccessBlocked(c)
 	case models.AccessStatusActive:
 	default:
 		return fiber.NewError(fiber.StatusUnauthorized, "user is not allowed")

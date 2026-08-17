@@ -7,11 +7,11 @@ Mobile-first private music library for Safari on iOS 16.4+ and Chrome on Android
 1. The browser calculates a full-file SHA-256 in a Web Worker. The API rejects an exact duplicate before any bytes are uploaded.
 2. The browser uploads up to 50 files, one at a time, directly to R2 in resumable 8 MiB multipart chunks. R2 credentials never reach the browser.
    Add shows only active or actionable work: ready/cancelled rows disappear, while errors and duplicates remain until retry or dismissal. Terminal upload metadata and successful jobs are removed after one hour.
-3. A PostgreSQL-backed media job verifies the uploaded hash, reads tags and embedded artwork, and produces the single retained audio object: an M4A AAC-LC 256 kbit/s playback file with `faststart`. The temporary uploaded source is deleted after publication.
+3. A PostgreSQL-backed media job verifies the uploaded hash, reads tags and embedded artwork, and publishes only after producing both the progressive M4A fallback and a byte-range CMAF/fMP4 asset for continuous HLS playback. The temporary uploaded source is deleted after publication.
 4. Only `ready` tracks appear in the newest-first catalog and search. PostgreSQL combines weighted full-text indexes with a trigram fallback, so title, artist, and album can match in any word order, by unfinished prefixes, without diacritics, and with a soft typo when no normal result exists.
-5. Catalog and liked queues fetch 20 tracks at a time and keep extending during playback, while consumed history stays bounded for large libraries.
+5. Catalog, liked, and shuffle playback sessions extend their queue on the server beyond the tracks currently rendered by React. One HLS media source spans track boundaries, so normal background playback does not depend on JavaScript changing `audio.src` after every song.
 6. Shuffle walks the complete ready library through a signed server cursor instead of choosing only from tracks already rendered in the browser.
-7. The player keeps its queue, position, current track, and shuffle state locally, integrates with Media Session, and automatically resumes the same position after transient network failures.
+7. The player keeps its queue, position, current track, shuffle state, and resumable playback session locally, integrates with Media Session, and automatically resumes the same position after transient network failures. Progressive M4A playback remains available while the existing library is being backfilled or when a track has no ready CMAF asset.
 
 Exact SHA-256 equality is the only duplicate rule. Similar recordings, remasters, and differently encoded files are allowed.
 
@@ -64,6 +64,7 @@ The root [`.env.example`](.env.example) documents application, cookie, SMTP, R2,
 - `ADMIN_EMAILS=tozikalexey@gmail.com` (comma-separated when more than one protected owner is needed);
 - `CORS_ORIGINS=https://music.antolex.net`;
 - `R2_BUCKET_NAME=antolex-music`;
+- `HLS_PLAYBACK_ENABLED=false` for the first CMAF-backfill release, then `true` only after the production readiness query in the runbook passes;
 - a verified SMTP sender such as `auth@antolex.net`.
 
 The six-digit email code expires after 10 minutes. Any valid email address can request a code. A newly verified address is created as pending and can sign in only after a configured owner approves it on `/admin`; blocking an account revokes its next API request and a blocked account cannot reactivate itself by requesting another code. Approved sign-in creates a 30-day `HttpOnly`, `Secure`, `SameSite=Lax` cookie. Owners are derived only from `ADMIN_EMAILS`, cannot be blocked through the API, and do not restore general product roles. Approved users can browse, like, play, and upload music; likes remain isolated by user.

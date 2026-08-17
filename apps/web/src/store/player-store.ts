@@ -13,9 +13,10 @@ import {
   useQueueContinuationStore,
   type QueueContinuationSource,
 } from "./queue-continuation-store";
-import type { Track, User } from "../types";
+import type { PlaybackSessionSource, Track, User } from "../types";
 
-const DEFAULT_PLAYER_STORAGE_KEY = "antolex-music-player-v1";
+const DEFAULT_PLAYER_STORAGE_KEY = "antolex-music-player-v2";
+const PREVIOUS_PLAYER_STORAGE_KEY = "antolex-music-player-v1";
 const LEGACY_PLAYER_STORAGE_KEY = "tozikron-player";
 const STREAM_TTL_MS = 10 * 60 * 1000;
 const PREVIOUS_RESTART_THRESHOLD_SECONDS = 3;
@@ -69,6 +70,10 @@ type PersistedPlayerState = {
   queue: PersistedQueueItem[];
   currentIndex: number;
   currentTime: number;
+  playbackSessionId: string | null;
+  playbackSessionQueueContextId: string | null;
+  playbackTimelineTime: number;
+  playbackSessionSource: PlaybackSessionSource | null;
 };
 
 type QueueInput = Track | Track[];
@@ -109,6 +114,10 @@ type PlayerState = {
   bufferedTo: number;
   seekTarget: number | null;
   error: string | null;
+  playbackSessionId: string | null;
+  playbackSessionQueueContextId: string | null;
+  playbackTimelineTime: number;
+  playbackSessionSource: PlaybackSessionSource | null;
   activeRequestId: number;
   setSession: (
     token: string | null | undefined,
@@ -147,6 +156,19 @@ type PlayerState = {
     currentTime: number,
     duration: number,
     bufferedTo: number,
+  ) => void;
+  setPlaybackSession: (
+    id: string,
+    queueContextId: string,
+    timelineTime: number,
+    source?: PlaybackSessionSource | null,
+  ) => void;
+  clearPlaybackSession: () => void;
+  syncPlaybackSessionQueue: (
+    items: Array<{ ordinal: number; track: Track }>,
+    currentOrdinal: number,
+    currentTime: number,
+    timelineTime: number,
   ) => void;
   handleTrackEnded: () => void;
   handlePlaybackError: (message: string) => void;
@@ -635,6 +657,10 @@ export function createPlayerStore(
         bufferedTo: 0,
         seekTarget: null,
         error: null,
+        playbackSessionId: null,
+        playbackSessionQueueContextId: null,
+        playbackTimelineTime: 0,
+        playbackSessionSource: null,
         activeRequestId: 0,
         setSession: (_token, user, sessionExpiresAt) =>
           set({ token: null, user: normalizeUser(user), sessionExpiresAt }),
@@ -652,6 +678,10 @@ export function createPlayerStore(
             pendingAdvanceQueueContextId: null,
             shuffleLoading: false,
             shuffleRequestId: state.shuffleRequestId + 1,
+            playbackSessionId: null,
+            playbackSessionQueueContextId: null,
+            playbackTimelineTime: 0,
+            playbackSessionSource: null,
           }));
         },
         replaceQueue: (tracks, startIndex = 0, autoplay = true) => {
@@ -699,6 +729,10 @@ export function createPlayerStore(
               state.shuffleEnabled
                 ? null
                 : state.preShuffleContinuation,
+            playbackSessionId: null,
+            playbackSessionQueueContextId: null,
+            playbackTimelineTime: 0,
+            playbackSessionSource: null,
           }));
 
           if (get().shuffleEnabled && currentItem) {
@@ -976,6 +1010,10 @@ export function createPlayerStore(
             pendingAdvanceQueueContextId: null,
             preShuffleQueue: [],
             preShuffleContinuation: null,
+            playbackSessionId: null,
+            playbackSessionQueueContextId: null,
+            playbackTimelineTime: 0,
+            playbackSessionSource: null,
           }));
         },
         setVolume: (value) => set({ volume: Math.min(Math.max(value, 0), 1) }),
@@ -1038,6 +1076,10 @@ export function createPlayerStore(
               pendingAdvanceQueueContextId: null,
               preShuffleQueue: [],
               preShuffleContinuation: null,
+              playbackSessionId: null,
+              playbackSessionQueueContextId: null,
+              playbackTimelineTime: 0,
+              playbackSessionSource: null,
             }));
             if (savedContinuation && restoredQueue.length > 0) {
               startQueueContinuation({
@@ -1088,6 +1130,10 @@ export function createPlayerStore(
             preShuffleQueue: compacted.queue,
             preShuffleContinuation: savedContinuation,
             error: null,
+            playbackSessionId: null,
+            playbackSessionQueueContextId: null,
+            playbackTimelineTime: 0,
+            playbackSessionSource: null,
           }));
           if (currentItem) void get().prefetchShuffle();
         },
@@ -1398,6 +1444,54 @@ export function createPlayerStore(
             duration: Number.isFinite(duration) ? duration : 0,
             bufferedTo: Number.isFinite(bufferedTo) ? bufferedTo : 0,
           }),
+        setPlaybackSession: (id, queueContextId, timelineTime, source) =>
+          set((state) => ({
+            playbackSessionId: id,
+            playbackSessionQueueContextId: queueContextId,
+            playbackTimelineTime: Math.max(0, timelineTime),
+            playbackSessionSource:
+              source === undefined ? state.playbackSessionSource : source,
+          })),
+        clearPlaybackSession: () =>
+          set({
+            playbackSessionId: null,
+            playbackSessionQueueContextId: null,
+            playbackTimelineTime: 0,
+            playbackSessionSource: null,
+          }),
+        syncPlaybackSessionQueue: (
+          items,
+          currentOrdinal,
+          currentTime,
+          timelineTime,
+        ) =>
+          set((state) => {
+            const queue = items.map(({ ordinal, track }, index) => {
+              const existing = state.queue[index];
+              if (existing?.track.external_id === track.external_id) {
+                return { ...existing, track: { ...existing.track, ...track } };
+              }
+              return {
+                ...createQueueItem(track),
+                queueId: `playback-${ordinal}-${track.external_id}`,
+              };
+            });
+            const currentIndex = items.findIndex(
+              (item) => item.ordinal === currentOrdinal,
+            );
+            if (currentIndex < 0) return {};
+            return {
+              queue,
+              currentIndex,
+              currentTime: Math.max(0, currentTime),
+              duration: queue[currentIndex]?.track.duration_seconds ?? 0,
+              bufferedTo: 0,
+              seekTarget: null,
+              playbackTimelineTime: Math.max(0, timelineTime),
+              error: null,
+              pendingAdvanceQueueContextId: null,
+            };
+          }),
         handleTrackEnded: () => {
           const endedQueueContextId = get().queueContextId;
           const endedQueueId = selectCurrentItem(get())?.queueId;
@@ -1540,6 +1634,11 @@ export function createPlayerStore(
             queue: persistItems(compacted.queue),
             currentIndex: compacted.currentIndex,
             currentTime: state.currentTime,
+            playbackSessionId: state.playbackSessionId,
+            playbackSessionQueueContextId:
+              state.playbackSessionQueueContextId,
+            playbackTimelineTime: state.playbackTimelineTime,
+            playbackSessionSource: state.playbackSessionSource,
           };
         },
         merge: (persistedState, currentState) => {
@@ -1568,6 +1667,12 @@ export function createPlayerStore(
           const hasValidSession =
             !!persisted.user &&
             !isSessionExpired(sessionExpiresAt);
+          const hydratedQueueContextId =
+            typeof persisted.queueContextId === "string" &&
+            persisted.queueContextId !== "" &&
+            persisted.queueTruncated !== true
+              ? persisted.queueContextId
+              : createQueueContextId();
 
           return {
             ...currentState,
@@ -1601,12 +1706,7 @@ export function createPlayerStore(
               persisted.shuffleCycleHasTracks === true,
             shuffleLoading: false,
             shuffleRequestId: 0,
-            queueContextId:
-              typeof persisted.queueContextId === "string" &&
-              persisted.queueContextId !== "" &&
-              persisted.queueTruncated !== true
-                ? persisted.queueContextId
-                : createQueueContextId(),
+            queueContextId: hydratedQueueContextId,
             pendingAdvanceQueueContextId: null,
             preShuffleQueue: shuffleEnabled ? preShuffleQueue : [],
             preShuffleContinuation: shuffleEnabled
@@ -1634,6 +1734,47 @@ export function createPlayerStore(
                 : null,
             error: null,
             activeRequestId: 0,
+            playbackSessionId:
+              typeof persisted.playbackSessionId === "string"
+                ? persisted.playbackSessionId
+                : null,
+            playbackSessionQueueContextId:
+              typeof persisted.playbackSessionId === "string"
+                ? persisted.queueTruncated === true
+                  ? hydratedQueueContextId
+                  : typeof persisted.playbackSessionQueueContextId === "string"
+                  ? persisted.playbackSessionQueueContextId
+                  : typeof persisted.queueContextId === "string"
+                    ? persisted.queueContextId
+                    : hydratedQueueContextId
+                : null,
+            playbackTimelineTime:
+              typeof persisted.playbackTimelineTime === "number" &&
+              Number.isFinite(persisted.playbackTimelineTime)
+                ? Math.max(0, persisted.playbackTimelineTime)
+                : 0,
+            playbackSessionSource:
+              persisted.playbackSessionSource?.kind === "likes"
+                ? { kind: "likes" }
+                : persisted.playbackSessionSource?.kind === "shuffle"
+                  ? {
+                      kind: "shuffle",
+                      ...(typeof persisted.playbackSessionSource
+                        .exclude_external_id === "string"
+                        ? {
+                            exclude_external_id:
+                              persisted.playbackSessionSource
+                                .exclude_external_id,
+                          }
+                        : {}),
+                    }
+                  : persisted.playbackSessionSource?.kind === "search" &&
+                      typeof persisted.playbackSessionSource.query === "string"
+                    ? {
+                        kind: "search",
+                        query: persisted.playbackSessionSource.query,
+                      }
+                    : null,
           };
         },
       },
@@ -1646,13 +1787,13 @@ export function createPlayerStore(
 function migrateLegacyPlayerStorage() {
   if (typeof window === "undefined") return;
   try {
-    if (
-      !window.localStorage.getItem(DEFAULT_PLAYER_STORAGE_KEY) &&
-      window.localStorage.getItem(LEGACY_PLAYER_STORAGE_KEY)
-    ) {
+    const previous =
+      window.localStorage.getItem(PREVIOUS_PLAYER_STORAGE_KEY) ??
+      window.localStorage.getItem(LEGACY_PLAYER_STORAGE_KEY);
+    if (!window.localStorage.getItem(DEFAULT_PLAYER_STORAGE_KEY) && previous) {
       window.localStorage.setItem(
         DEFAULT_PLAYER_STORAGE_KEY,
-        window.localStorage.getItem(LEGACY_PLAYER_STORAGE_KEY)!,
+        previous,
       );
     }
   } catch {

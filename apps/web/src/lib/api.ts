@@ -5,7 +5,9 @@ import type {
   APIErrorPayload,
   APIErrorResponse,
   AuthSession,
+  CreatePlaybackSessionInput,
   LikesResponse,
+  PlaybackSession,
   SearchResponse,
   ShuffleResponse,
   Track,
@@ -58,6 +60,18 @@ function notifyInvalidSession(status: number, code: string) {
   );
 }
 
+function fallbackResponseMessage(status: number) {
+  if (status === 401) return "Your session has expired. Sign in again.";
+  if (status === 403) return "You don’t have access to this action.";
+  if (status === 404) return "This item is no longer available.";
+  if (status === 408) return "The request took too long. Please try again.";
+  if (status === 429) return "Too many requests. Wait a moment and try again.";
+  if (status >= 500) {
+    return "ANTOLEX is temporarily unavailable. Please try again in a moment.";
+  }
+  return "We couldn’t complete that request. Please try again.";
+}
+
 async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
   const headers = new Headers(init.headers);
   const isFormData =
@@ -82,12 +96,11 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
         throw new APIError(response.status, payload.error);
       }
     }
-    const message = await response.text();
     const code = response.status === 401 ? "unauthorized" : "request_failed";
     notifyInvalidSession(response.status, code);
     throw new APIError(response.status, {
       code,
-      message: message || "Request failed",
+      message: fallbackResponseMessage(response.status),
     });
   }
 
@@ -202,6 +215,25 @@ export const api = {
       method: "DELETE",
       token,
     });
+  },
+  createPlaybackSession(payload: CreatePlaybackSessionInput, signal?: AbortSignal) {
+    return request<PlaybackSession>("/me/playback-sessions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal,
+    });
+  },
+  getPlaybackSession(id: string, signal?: AbortSignal) {
+    return request<PlaybackSession>(
+      `/me/playback-sessions/${encodeURIComponent(id)}`,
+      { signal },
+    );
+  },
+  deletePlaybackSession(id: string) {
+    return request<void>(
+      `/me/playback-sessions/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    );
   },
   async createUpload(payload: {
     file_name: string;

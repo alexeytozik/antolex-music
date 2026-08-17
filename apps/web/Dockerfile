@@ -16,7 +16,9 @@ CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
 FROM dependencies AS build
 
 ARG VITE_API_BASE_URL=/api/v1
+ARG VITE_HLS_PLAYBACK_ENABLED=false
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+ENV VITE_HLS_PLAYBACK_ENABLED=${VITE_HLS_PLAYBACK_ENABLED}
 
 COPY . .
 RUN npm run build

@@ -93,6 +93,12 @@ export function QueueContinuation() {
   const playerQueueContextId = usePlayerStore((state) => state.queueContextId);
   const currentIndex = usePlayerStore((state) => state.currentIndex);
   const shuffleEnabled = usePlayerStore((state) => state.shuffleEnabled);
+  const playbackSessionId = usePlayerStore(
+    (state) => state.playbackSessionId,
+  );
+  const playbackSessionQueueContextId = usePlayerStore(
+    (state) => state.playbackSessionQueueContextId,
+  );
   const requestInFlightRef = useRef(false);
   const requestSequenceRef = useRef(0);
   const retryAttemptRef = useRef(0);
@@ -103,6 +109,13 @@ export function QueueContinuation() {
 
   useEffect(() => {
     if (!source || !queueContextId) return;
+
+    if (
+      playbackSessionId &&
+      playbackSessionQueueContextId === playerQueueContextId
+    ) {
+      return;
+    }
 
     if (shuffleEnabled && source.kind !== "shuffle") {
       stopQueueContinuation();
@@ -241,6 +254,8 @@ export function QueueContinuation() {
     retryNonce,
     source,
     shuffleEnabled,
+    playbackSessionId,
+    playbackSessionQueueContextId,
   ]);
 
   return null;

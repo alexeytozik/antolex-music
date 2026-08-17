@@ -6,6 +6,16 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      hls_playback_enabled:
+        description: HLS_PLAYBACK_ENABLED for this deploy
+        required: true
+        default: keep
+        type: choice
+        options:
+          - keep
+          - "false"
+          - "true"
 
 permissions:
   contents: read
@@ -156,6 +166,7 @@ jobs:
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           RELEASE_ID: ${{ steps.release.outputs.release_id }}
           RELEASE_ARCHIVE: ${{ steps.release.outputs.archive }}
+          HLS_PLAYBACK_ROLLOUT: ${{ github.event.inputs.hls_playback_enabled || 'keep' }}
         run: |
           set -euo pipefail
           for variable in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
@@ -164,6 +175,13 @@ jobs:
               exit 1
             fi
           done
+          case "${HLS_PLAYBACK_ROLLOUT}" in
+            keep|false|true) ;;
+            *)
+              printf '::error::Invalid HLS playback rollout value.\n' >&2
+              exit 1
+              ;;
+          esac
 
           install -d -m 700 "${HOME}/.ssh"
           key_path="${HOME}/.ssh/antolex_deploy_key"
@@ -199,6 +217,57 @@ jobs:
           scp -q "${ssh_options[@]}" \
             ./scripts/deploy-production.sh \
             "${remote}:${remote_root}/incoming/${deploy_script}"
+
+          # A push resolves to "keep" and does not touch the shared environment.
+          # Manual false/true changes only HLS_PLAYBACK_ENABLED, atomically.
+          ssh "${ssh_options[@]}" "${remote}" \
+            bash -s -- "${HLS_PLAYBACK_ROLLOUT}" <<'REMOTE_HLS'
+          set -euo pipefail
+          rollout="$1"
+          case "${rollout}" in
+            keep)
+              exit 0
+              ;;
+            false|true) ;;
+            *)
+              printf 'Invalid HLS playback rollout value.\n' >&2
+              exit 1
+              ;;
+          esac
+
+          shared_env=/home/atozik/antolex-music/shared/.env
+          if [[ ! -f "${shared_env}" ]]; then
+            printf 'Missing shared production environment.\n' >&2
+            exit 1
+          fi
+          if [[ "$(stat -c '%a' "${shared_env}")" != 600 ]]; then
+            printf 'Shared production environment must have mode 600.\n' >&2
+            exit 1
+          fi
+
+          umask 077
+          next_env="$(mktemp /home/atozik/antolex-music/shared/.env.hls.XXXXXX)"
+          trap 'rm -f -- "${next_env}"' EXIT
+          awk -v value="${rollout}" '
+            BEGIN { replaced = 0 }
+            /^[[:space:]]*HLS_PLAYBACK_ENABLED[[:space:]]*=/ {
+              if (!replaced) {
+                print "HLS_PLAYBACK_ENABLED=" value
+                replaced = 1
+              }
+              next
+            }
+            { print }
+            END {
+              if (!replaced) {
+                print "HLS_PLAYBACK_ENABLED=" value
+              }
+            }
+          ' "${shared_env}" >"${next_env}"
+          chmod 600 "${next_env}"
+          mv -f -- "${next_env}" "${shared_env}"
+          trap - EXIT
+          REMOTE_HLS
 
           # These generated values are deliberately expanded on the runner.
           # shellcheck disable=SC2029
