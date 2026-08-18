@@ -85,16 +85,15 @@ export function shouldUseNativeHLS(
 }
 
 export function shouldProbeNativeHLS(
-  audio: Pick<HTMLAudioElement, "canPlayType">,
-  userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent,
+  _audio: Pick<HTMLAudioElement, "canPlayType">,
+  _userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent,
 ) {
-  if (!/Android/i.test(userAgent) || /Firefox|FxiOS/i.test(userAgent)) {
-    return false;
-  }
-  return Boolean(
-    audio.canPlayType("application/vnd.apple.mpegurl") ||
-      audio.canPlayType("application/x-mpegURL"),
-  );
+  // Chromium on Android can advertise native HLS and reach `canplay`, yet
+  // still treat an EVENT playlist as a live stream and jump to its final
+  // item instead of honoring EXT-X-START. That makes the decoded song diverge
+  // from audio.currentTime and the server timeline. Keep Android on hls.js;
+  // only Apple WebKit uses the platform HLS pipeline.
+  return false;
 }
 
 export function usePlaybackSessionDriver({

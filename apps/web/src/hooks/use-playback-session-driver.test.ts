@@ -76,12 +76,12 @@ describe("shouldUseNativeHLS", () => {
     ).toBe(false);
   });
 
-  it("probes advertised native HLS on Android without changing desktop Chromium", () => {
+  it("does not trust advertised native HLS on Android Chromium", () => {
     const androidChrome =
-      "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36";
+      "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36";
     expect(shouldUseNativeHLS(audioWithNativeHLS(), androidChrome, 5)).toBe(false);
-    expect(shouldProbeNativeHLS(audioWithNativeHLS(), androidChrome)).toBe(true);
+    expect(shouldProbeNativeHLS(audioWithNativeHLS(), androidChrome)).toBe(false);
     expect(shouldProbeNativeHLS(audioWithNativeHLS(""), androidChrome)).toBe(false);
   });
 });

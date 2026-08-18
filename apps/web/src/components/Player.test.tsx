@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { APIError, api } from "../lib/api";
 import { requestPlaybackActivation } from "../lib/playback-activation";
-import { ANDROID_NATIVE_HLS_PROBE_TIMEOUT_MS } from "../hooks/use-playback-session-driver";
 import { selectCurrentItem, usePlayerStore } from "../store/player-store";
 import type { Track } from "../types";
 import { Player } from "./Player";
@@ -65,8 +64,8 @@ const CHROME_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 const ANDROID_CHROME_USER_AGENT =
-  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
-  "(KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36";
+  "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36";
 const IPHONE_USER_AGENT =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 16_4 like Mac OS X) " +
   "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Mobile/15E148 Safari/604.1";
@@ -803,8 +802,7 @@ describe("Player media-event races", () => {
     expect(audio.getAttribute("src")).not.toContain("session-chrome/index.m3u8");
   });
 
-  it("probes Android native HLS and falls back to hls.js after a bounded timeout", async () => {
-    vi.useFakeTimers();
+  it("uses hls.js directly on Android even when Chromium advertises native HLS", async () => {
     mockUserAgent(ANDROID_CHROME_USER_AGENT);
     vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("maybe");
     vi.spyOn(api, "createPlaybackSession").mockResolvedValue({
@@ -824,15 +822,7 @@ describe("Player media-event races", () => {
 
     await act(async () => {
       await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(audio.getAttribute("src")).toContain("session-android-probe/index.m3u8");
-    expect(hlsTestState.loadedSources).toHaveLength(0);
-
-    await act(async () => {
-      vi.advanceTimersByTime(ANDROID_NATIVE_HLS_PROBE_TIMEOUT_MS);
-      await Promise.resolve();
-      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
     expect(hlsTestState.loadedSources).toContain(
