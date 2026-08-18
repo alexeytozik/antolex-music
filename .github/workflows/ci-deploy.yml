@@ -22,7 +22,12 @@ permissions:
 
 concurrency:
   group: antolex-music-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: >-
+    ${{
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' &&
+       contains(github.event.head_commit.message, '[cancel-stalled-ci]'))
+    }}
 
 jobs:
   frontend:
