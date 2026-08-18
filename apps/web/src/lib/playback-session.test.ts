@@ -4,6 +4,8 @@ import type { PlaybackSessionItem, Track } from "../types";
 import {
   createPlaybackSessionInput,
   findPlaybackBoundary,
+  mergePlaybackSessionTimeline,
+  playbackTimelineEnd,
   timelinePositionFor,
 } from "./playback-session";
 
@@ -37,6 +39,59 @@ describe("playback session timeline", () => {
     expect(findPlaybackBoundary([item(0, 5)], 0)?.localSeconds).toBe(0);
     expect(findPlaybackBoundary([item(0, 5)], 30)?.localSeconds).toBe(10);
     expect(timelinePositionFor(item(0, 5), 30)).toBe(15);
+  });
+
+  it("merges a shorter stale refresh without losing known timeline items", () => {
+    const current = {
+      id: "session",
+      revision: 1,
+      manifest_url: "/session.m3u8",
+      expires_at: "2099-01-01T00:00:00Z",
+      start_offset_seconds: 0,
+      has_more: true,
+      items: [item(0, 0), item(1, 10), item(2, 20)],
+    };
+    const incoming = {
+      ...current,
+      expires_at: "2099-01-02T00:00:00Z",
+      items: [item(0, 0), item(1, 10)],
+    };
+
+    const merged = mergePlaybackSessionTimeline(current, incoming);
+
+    expect(merged.items.map(({ ordinal }) => ordinal)).toEqual([0, 1, 2]);
+    expect(merged.expires_at).toBe(incoming.expires_at);
+    expect(playbackTimelineEnd(merged.items)).toBe(30);
+  });
+
+  it("does not roll session metadata back to an older revision", () => {
+    const current = {
+      id: "session",
+      revision: 3,
+      manifest_url: "/session.m3u8?revision=3",
+      expires_at: "2099-01-03T00:00:00Z",
+      start_offset_seconds: 0,
+      has_more: false,
+      items: [item(0, 0), item(1, 10)],
+    };
+    const incoming = {
+      ...current,
+      revision: 2,
+      manifest_url: "/session.m3u8?revision=2",
+      expires_at: "2099-01-02T00:00:00Z",
+      has_more: true,
+      items: [item(0, 0)],
+    };
+
+    const merged = mergePlaybackSessionTimeline(current, incoming);
+
+    expect(merged).toMatchObject({
+      revision: 3,
+      manifest_url: current.manifest_url,
+      expires_at: current.expires_at,
+      has_more: false,
+    });
+    expect(merged.items.map(({ ordinal }) => ordinal)).toEqual([0, 1]);
   });
 
   it("builds a validated seed and caps it at 100 tracks", () => {

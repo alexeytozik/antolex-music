@@ -164,12 +164,17 @@ type PlayerState = {
     source?: PlaybackSessionSource | null,
   ) => void;
   clearPlaybackSession: () => void;
-  syncPlaybackSessionQueue: (
-    items: Array<{ ordinal: number; track: Track }>,
-    currentOrdinal: number,
-    currentTime: number,
-    timelineTime: number,
-  ) => void;
+  syncPlaybackSessionTimeline: (snapshot: {
+    id: string;
+    queueContextId: string;
+    timelineTime: number;
+    currentOrdinal: number;
+    currentTime: number;
+    duration: number;
+    bufferedTo: number;
+    items?: Array<{ ordinal: number; track: Track }>;
+    source?: PlaybackSessionSource | null;
+  }) => void;
   handleTrackEnded: () => void;
   handlePlaybackError: (message: string) => void;
   setLikedExternalIDs: (externalIDs: string[]) => void;
@@ -1459,35 +1464,46 @@ export function createPlayerStore(
             playbackTimelineTime: 0,
             playbackSessionSource: null,
           }),
-        syncPlaybackSessionQueue: (
-          items,
-          currentOrdinal,
-          currentTime,
-          timelineTime,
-        ) =>
+        syncPlaybackSessionTimeline: (snapshot) =>
           set((state) => {
-            const queue = items.map(({ ordinal, track }, index) => {
-              const existing = state.queue[index];
-              if (existing?.track.external_id === track.external_id) {
-                return { ...existing, track: { ...existing.track, ...track } };
-              }
-              return {
-                ...createQueueItem(track),
-                queueId: `playback-${ordinal}-${track.external_id}`,
-              };
-            });
-            const currentIndex = items.findIndex(
-              (item) => item.ordinal === currentOrdinal,
+            const existingByQueueID = new Map(
+              state.queue.map((item) => [item.queueId, item] as const),
+            );
+            const queue = snapshot.items
+              ? snapshot.items.map(({ ordinal, track }) => {
+                  const queueId = `playback-${ordinal}-${track.external_id}`;
+                  const existing = existingByQueueID.get(queueId);
+                  return existing
+                    ? {
+                        ...existing,
+                        track: { ...existing.track, ...track },
+                      }
+                    : { ...createQueueItem(track), queueId };
+                })
+              : state.queue;
+            const currentQueueIDPrefix = `playback-${snapshot.currentOrdinal}-`;
+            const currentIndex = queue.findIndex((item) =>
+              item.queueId.startsWith(currentQueueIDPrefix),
             );
             if (currentIndex < 0) return {};
             return {
               queue,
               currentIndex,
-              currentTime: Math.max(0, currentTime),
-              duration: queue[currentIndex]?.track.duration_seconds ?? 0,
-              bufferedTo: 0,
+              currentTime: Math.max(0, snapshot.currentTime),
+              duration: Number.isFinite(snapshot.duration)
+                ? Math.max(0, snapshot.duration)
+                : 0,
+              bufferedTo: Number.isFinite(snapshot.bufferedTo)
+                ? Math.max(0, snapshot.bufferedTo)
+                : 0,
               seekTarget: null,
-              playbackTimelineTime: Math.max(0, timelineTime),
+              playbackSessionId: snapshot.id,
+              playbackSessionQueueContextId: snapshot.queueContextId,
+              playbackTimelineTime: Math.max(0, snapshot.timelineTime),
+              playbackSessionSource:
+                snapshot.source === undefined
+                  ? state.playbackSessionSource
+                  : snapshot.source,
               error: null,
               pendingAdvanceQueueContextId: null,
             };

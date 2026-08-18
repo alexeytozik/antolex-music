@@ -416,6 +416,45 @@ describe('player store queue session', () => {
     expect(restored.getState().playbackTimelineTime).toBe(75);
   });
 
+  it('keeps repeated shuffle tracks distinct by playback ordinal', () => {
+    const store = createPlayerStore(
+      `test-player-${crypto.randomUUID()}`,
+      createTestStorage(),
+    );
+    const repeated = makeTrack(31);
+    const middle = makeTrack(32);
+    const queueContextId = store.getState().queueContextId;
+
+    store.getState().syncPlaybackSessionTimeline({
+      id: 'session-repeat',
+      queueContextId,
+      timelineTime: 21,
+      currentOrdinal: 2,
+      currentTime: 1,
+      duration: 10,
+      bufferedTo: 3,
+      items: [
+        { ordinal: 0, track: repeated },
+        { ordinal: 1, track: middle },
+        { ordinal: 2, track: repeated },
+      ],
+      source: { kind: 'shuffle' },
+    });
+
+    expect(store.getState().queue.map(({ queueId }) => queueId)).toEqual([
+      `playback-0-${repeated.external_id}`,
+      `playback-1-${middle.external_id}`,
+      `playback-2-${repeated.external_id}`,
+    ]);
+    expect(store.getState()).toMatchObject({
+      currentIndex: 2,
+      currentTime: 1,
+      duration: 10,
+      bufferedTo: 3,
+      playbackTimelineTime: 21,
+    });
+  });
+
   it('enables global shuffle without restarting the current track', async () => {
     const store = createPlayerStore(`test-player-${crypto.randomUUID()}`, createTestStorage());
     const tracks = [

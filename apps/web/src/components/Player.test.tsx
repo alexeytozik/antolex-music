@@ -309,6 +309,358 @@ describe("Player media-event races", () => {
     expect(audio.getAttribute("src")).toBe(manifestSource);
   });
 
+  it("reconciles the visible mobile player after background playback skips events", async () => {
+    mockUserAgent(IPHONE_USER_AGENT);
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("maybe");
+    vi.spyOn(api, "createPlaybackSession").mockResolvedValue({
+      id: "session-foreground-sync",
+      revision: 1,
+      manifest_url: "/api/v1/me/playback-sessions/session-foreground-sync/index.m3u8",
+      expires_at: "2099-01-01T00:00:00Z",
+      start_offset_seconds: 0,
+      has_more: false,
+      items: [
+        { ordinal: 0, track: track("a"), timeline_start_ms: 0, duration_ms: 10_000 },
+        { ordinal: 1, track: track("b"), timeline_start_ms: 10_000, duration_ms: 10_000 },
+        { ordinal: 2, track: track("c"), timeline_start_ms: 20_000, duration_ms: 10_000 },
+      ],
+    });
+    vi.spyOn(api, "getPlaybackSession").mockResolvedValue({
+      id: "session-foreground-sync",
+      revision: 1,
+      manifest_url: "/api/v1/me/playback-sessions/session-foreground-sync/index.m3u8",
+      expires_at: "2099-01-01T00:00:00Z",
+      start_offset_seconds: 0,
+      has_more: false,
+      items: [
+        { ordinal: 0, track: track("a"), timeline_start_ms: 0, duration_ms: 10_000 },
+        { ordinal: 1, track: track("b"), timeline_start_ms: 10_000, duration_ms: 10_000 },
+        { ordinal: 2, track: track("c"), timeline_start_ms: 20_000, duration_ms: 10_000 },
+      ],
+    });
+    usePlayerStore.getState().replaceQueue([track("a"), track("b"), track("c")], 0, true);
+    const container = render(<Player />);
+    const audio = container.querySelector("audio")!;
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(selectCurrentItem(usePlayerStore.getState())?.track.external_id).toBe("a");
+
+    // Native HLS continued while JavaScript was frozen. No timeupdate was
+    // delivered for either crossed boundary before the page returned.
+    // iOS can report the pre-lock position for the first lifecycle event and
+    // expose the advanced native HLS position a moment later.
+    audio.currentTime = 9;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      audio.currentTime = 24;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+
+    expect(selectCurrentItem(usePlayerStore.getState())?.track.external_id).toBe("c");
+    expect(usePlayerStore.getState()).toMatchObject({
+      currentTime: 4,
+      duration: 10,
+      playbackTimelineTime: 24,
+    });
+  });
+
+  it("preserves the restored HLS position while native media is still attaching", async () => {
+    mockUserAgent(IPHONE_USER_AGENT);
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("maybe");
+    vi.spyOn(api, "createPlaybackSession").mockResolvedValue({
+      id: "session-slow-native-attach",
+      revision: 1,
+      manifest_url: "/api/v1/me/playback-sessions/session-slow-native-attach/index.m3u8",
+      expires_at: "2099-01-01T00:00:00Z",
+      start_offset_seconds: 73,
+      has_more: false,
+      items: [
+        { ordinal: 0, track: track("a"), timeline_start_ms: 0, duration_ms: 180_000 },
+      ],
+    });
+    usePlayerStore.getState().replaceQueue([track("a")], 0, true);
+    vi.useFakeTimers();
+    const container = render(<Player />);
+    const audio = container.querySelector("audio")!;
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(usePlayerStore.getState().playbackTimelineTime).toBe(73);
+
+    audio.currentTime = 0;
+    act(() => {
+      audio.dispatchEvent(new Event("durationchange"));
+      vi.advanceTimersByTime(1_500);
+    });
+    expect(usePlayerStore.getState()).toMatchObject({
+      currentTime: 73,
+      playbackTimelineTime: 73,
+    });
+
+    act(() => audio.dispatchEvent(new Event("loadedmetadata")));
+    audio.currentTime = 74;
+    act(() => audio.dispatchEvent(new Event("canplay")));
+    expect(usePlayerStore.getState()).toMatchObject({
+      currentTime: 74,
+      playbackTimelineTime: 74,
+    });
+  });
+
+  it("refreshes missing timeline metadata instead of pinning the UI to the old last track", async () => {
+    mockUserAgent(IPHONE_USER_AGENT);
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("maybe");
+    const firstPage = {
+      id: "session-growing-timeline",
+      revision: 1,
+      manifest_url: "/api/v1/me/playback-sessions/session-growing-timeline/index.m3u8",
+      expires_at: "2099-01-01T00:00:00Z",
+      start_offset_seconds: 0,
+      has_more: true,
+      items: [
+        { ordinal: 0, track: track("a"), timeline_start_ms: 0, duration_ms: 10_000 },
+      ],
+    };
+    vi.spyOn(api, "createPlaybackSession").mockResolvedValue(firstPage);
+    vi.spyOn(api, "getPlaybackSession").mockResolvedValue({
+      ...firstPage,
+      items: [
+        ...firstPage.items,
+        { ordinal: 1, track: track("b"), timeline_start_ms: 10_000, duration_ms: 10_000 },
+      ],
+    });
+    usePlayerStore.getState().replaceQueue([track("a")], 0, true);
+    const container = render(<Player />);
+    const audio = container.querySelector("audio")!;
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    audio.currentTime = 12;
+    await act(async () => {
+      audio.dispatchEvent(new Event("timeupdate"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(api.getPlaybackSession).toHaveBeenCalledWith(
+      "session-growing-timeline",
+    );
+    expect(selectCurrentItem(usePlayerStore.getState())?.track.external_id).toBe("b");
+    expect(usePlayerStore.getState()).toMatchObject({
+      currentTime: 2,
+      duration: 10,
+      playbackTimelineTime: 12,
+    });
+  });
+
+  it("backs off while missing timeline metadata is temporarily unavailable", async () => {
+    mockUserAgent(IPHONE_USER_AGENT);
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("maybe");
+    const firstPage = {
+      id: "session-timeline-backoff",
+      revision: 1,
+      manifest_url: "/api/v1/me/playback-sessions/session-timeline-backoff/index.m3u8",
+      expires_at: "2099-01-01T00:00:00Z",
+      start_offset_seconds: 0,
+      has_more: true,
+      items: [
+        { ordinal: 0, track: track("a"), timeline_start_ms: 0, duration_ms: 10_000 },
+      ],
+    };
+    vi.spyOn(api, "createPlaybackSession").mockResolvedValue(firstPage);
+    const refresh = vi.spyOn(api, "getPlaybackSession");
+    refresh.mockRejectedValueOnce(new Error("temporary outage"));
+    usePlayerStore.getState().replaceQueue([track("a")], 0, true);
+    const container = render(<Player />);
+    const audio = container.querySelector("audio")!;
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    vi.useFakeTimers();
+    audio.currentTime = 12;
+    await act(async () => {
+      audio.dispatchEvent(new Event("timeupdate"));
+      audio.dispatchEvent(new Event("progress"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(usePlayerStore.getState().playbackTimelineTime).toBe(12);
+
+    refresh.mockResolvedValueOnce({
+      ...firstPage,
+      revision: 2,
+      items: [
+        ...firstPage.items,
+        { ordinal: 1, track: track("b"), timeline_start_ms: 10_000, duration_ms: 10_000 },
+      ],
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(2_100);
+      audio.dispatchEvent(new Event("timeupdate"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(selectCurrentItem(usePlayerStore.getState())?.track.external_id).toBe("b");
+    expect(usePlayerStore.getState()).toMatchObject({
+      currentTime: 2,
+      playbackTimelineTime: 12,
+    });
+  });
+
+  it("does not let a pending refresh from an old queue block the new session", async () => {
+    mockUserAgent(IPHONE_USER_AGENT);
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("maybe");
+    const sessionA = {
+      id: "session-refresh-a",
+      revision: 1,
+      manifest_url: "/api/v1/me/playback-sessions/session-refresh-a/index.m3u8",
+      expires_at: "2099-01-01T00:00:00Z",
+      start_offset_seconds: 0,
+      has_more: false,
+      items: [
+        { ordinal: 0, track: track("a"), timeline_start_ms: 0, duration_ms: 10_000 },
+      ],
+    };
+    const sessionB = {
+      ...sessionA,
+      id: "session-refresh-b",
+      manifest_url: "/api/v1/me/playback-sessions/session-refresh-b/index.m3u8",
+      items: [
+        { ordinal: 0, track: track("b"), timeline_start_ms: 0, duration_ms: 10_000 },
+      ],
+    };
+    vi.spyOn(api, "createPlaybackSession")
+      .mockResolvedValueOnce(sessionA)
+      .mockResolvedValueOnce(sessionB);
+    const refresh = vi.spyOn(api, "getPlaybackSession");
+    refresh
+      .mockReturnValueOnce(new Promise<never>(() => {}))
+      .mockResolvedValueOnce(sessionB);
+    vi.spyOn(api, "deletePlaybackSession").mockResolvedValue(undefined);
+    usePlayerStore.getState().replaceQueue([track("a")], 0, true);
+    render(<Player />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    act(() => window.dispatchEvent(new Event("focus")));
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenLastCalledWith("session-refresh-a");
+
+    act(() => usePlayerStore.getState().replaceQueue([track("b")], 0, true));
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(usePlayerStore.getState().playbackSessionId).toBe("session-refresh-b");
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenLastCalledWith("session-refresh-b");
+  });
+
+  it("ignores a transient HLS pause and reconciles on resumed playback", async () => {
+    mockUserAgent(IPHONE_USER_AGENT);
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("maybe");
+    vi.spyOn(api, "createPlaybackSession").mockResolvedValue({
+      id: "session-transient-pause",
+      revision: 1,
+      manifest_url: "/api/v1/me/playback-sessions/session-transient-pause/index.m3u8",
+      expires_at: "2099-01-01T00:00:00Z",
+      start_offset_seconds: 0,
+      has_more: false,
+      items: [
+        { ordinal: 0, track: track("a"), timeline_start_ms: 0, duration_ms: 10_000 },
+        { ordinal: 1, track: track("b"), timeline_start_ms: 10_000, duration_ms: 10_000 },
+      ],
+    });
+    usePlayerStore.getState().replaceQueue([track("a"), track("b")], 0, true);
+    const container = render(<Player />);
+    const audio = container.querySelector("audio")!;
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    audio.currentTime = 12;
+    act(() => {
+      audio.dispatchEvent(new Event("pause"));
+      audio.dispatchEvent(new Event("playing"));
+    });
+
+    expect(selectCurrentItem(usePlayerStore.getState())?.track.external_id).toBe("b");
+    expect(usePlayerStore.getState()).toMatchObject({
+      currentTime: 2,
+      duration: 10,
+      isPlaying: true,
+      status: "playing",
+    });
+  });
+
+  it("keeps playback intent while a hidden HLS stream is recovering", async () => {
+    mockUserAgent(IPHONE_USER_AGENT);
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("maybe");
+    vi.spyOn(api, "createPlaybackSession").mockResolvedValue({
+      id: "session-hidden-pause",
+      revision: 1,
+      manifest_url: "/api/v1/me/playback-sessions/session-hidden-pause/index.m3u8",
+      expires_at: "2099-01-01T00:00:00Z",
+      start_offset_seconds: 0,
+      has_more: false,
+      items: [
+        { ordinal: 0, track: track("a"), timeline_start_ms: 0, duration_ms: 10_000 },
+        { ordinal: 1, track: track("b"), timeline_start_ms: 10_000, duration_ms: 10_000 },
+      ],
+    });
+    usePlayerStore.getState().replaceQueue([track("a"), track("b")], 0, true);
+    const container = render(<Player />);
+    const audio = container.querySelector("audio")!;
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    audio.currentTime = 12;
+    vi.useFakeTimers();
+    act(() => {
+      audio.dispatchEvent(new Event("pause"));
+      audio.dispatchEvent(new Event("waiting"));
+      vi.advanceTimersByTime(500);
+    });
+
+    expect(usePlayerStore.getState()).toMatchObject({
+      currentTime: 2,
+      isPlaying: true,
+      status: "retrying",
+    });
+
+    act(() => audio.dispatchEvent(new Event("playing")));
+    expect(usePlayerStore.getState()).toMatchObject({
+      currentTime: 2,
+      isPlaying: true,
+      status: "playing",
+    });
+  });
+
   it("keeps the live position and resumes play after a late native HLS failure", async () => {
     mockUserAgent(SAFARI_USER_AGENT);
     vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("maybe");
@@ -600,7 +952,7 @@ describe("Player media-event races", () => {
     expect(hlsTestState.playedSessionIDs).toContain("session-canplay");
   });
 
-  it("synchronizes an actual HLS pause back to the player store", async () => {
+  it("recovers a persistent unsolicited HLS pause without losing play intent", async () => {
     mockUserAgent(CHROME_USER_AGENT);
     vi.spyOn(api, "createPlaybackSession").mockResolvedValue({
       id: "session-pause",
@@ -625,8 +977,55 @@ describe("Player media-event races", () => {
     await settle(playAttempts[playAttempts.length - 1]);
     act(() => audio.dispatchEvent(new Event("playing")));
 
-    act(() => audio.dispatchEvent(new Event("pause")));
+    vi.useFakeTimers();
+    act(() => {
+      audio.dispatchEvent(new Event("pause"));
+      vi.advanceTimersByTime(400);
+    });
 
+    expect(usePlayerStore.getState()).toMatchObject({
+      isPlaying: true,
+      status: "retrying",
+    });
+
+    act(() => audio.dispatchEvent(new Event("playing")));
+    expect(usePlayerStore.getState()).toMatchObject({
+      isPlaying: true,
+      status: "playing",
+    });
+  });
+
+  it("does not let a stale HLS playing event undo an explicit pause", async () => {
+    mockUserAgent(CHROME_USER_AGENT);
+    vi.spyOn(api, "createPlaybackSession").mockResolvedValue({
+      id: "session-explicit-pause",
+      revision: 1,
+      manifest_url: "/api/v1/me/playback-sessions/session-explicit-pause/index.m3u8",
+      expires_at: "2099-01-01T00:00:00Z",
+      start_offset_seconds: 0,
+      has_more: false,
+      items: [
+        { ordinal: 0, track: track("a"), timeline_start_ms: 0, duration_ms: 180_000 },
+      ],
+    });
+    usePlayerStore.getState().replaceQueue([track("a")], 0, true);
+    const container = render(<Player />);
+    const audio = container.querySelector("audio")!;
+
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    act(() => audio.dispatchEvent(new Event("playing")));
+    expect(usePlayerStore.getState().isPlaying).toBe(true);
+
+    act(() => usePlayerStore.getState().togglePlayback());
+    expect(usePlayerStore.getState()).toMatchObject({
+      isPlaying: false,
+      status: "paused",
+    });
+
+    act(() => audio.dispatchEvent(new Event("playing")));
     expect(usePlayerStore.getState()).toMatchObject({
       isPlaying: false,
       status: "paused",

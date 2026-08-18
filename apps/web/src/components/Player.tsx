@@ -605,7 +605,10 @@ export function Player() {
     const audio = audioRef.current;
     if (audio?.dataset.playbackActivation) return;
     if (sessionDriver.isHLS) {
-      sessionDriver.syncTimeline();
+      // Native HLS briefly reports 0 while it attaches the manifest. The
+      // driver restores the aggregate position from its metadata listener;
+      // do not overwrite that saved position with this transitional value.
+      if (sessionDriver.ready) sessionDriver.syncTimeline();
       return;
     }
     const item = selectCurrentItem(usePlayerStore.getState());
@@ -621,9 +624,7 @@ export function Player() {
     }
     const player = usePlayerStore.getState();
     const item = selectCurrentItem(player);
-    if (!audio || !item || !player.isPlaying) {
-      return;
-    }
+    if (!audio || !item) return;
     if (
       sessionDriver.isHLS
         ? audio.dataset.playbackSessionId !== sessionDriver.session?.id
@@ -632,6 +633,10 @@ export function Player() {
       return;
     }
     sessionDriver.handlePlaying();
+    if (!usePlayerStore.getState().isPlaying) {
+      audio.pause();
+      return;
+    }
     cancelRecovery();
     setPlaybackStatus("playing");
   }
@@ -735,7 +740,7 @@ export function Player() {
 
   return (
     <>
-      <audio ref={audioRef} preload="auto" onLoadedMetadata={loaded} onCanPlay={onCanPlay} onPlaying={onPlaying} onPause={onPause} onWaiting={onWaiting} onStalled={onStalled} onTimeUpdate={updateProgress} onProgress={updateProgress} onEnded={onEnded} onError={onError} />
+      <audio ref={audioRef} preload="auto" onLoadedMetadata={loaded} onLoadedData={loaded} onDurationChange={updateProgress} onCanPlay={onCanPlay} onPlaying={onPlaying} onPause={onPause} onWaiting={onWaiting} onStalled={onStalled} onTimeUpdate={updateProgress} onProgress={updateProgress} onSeeking={updateProgress} onSeeked={updateProgress} onEnded={onEnded} onError={onError} />
       <div className="mobile-player-ui">
         {track && (
           <div className="mini-player">

@@ -1,5 +1,6 @@
 import type {
   CreatePlaybackSessionInput,
+  PlaybackSession,
   PlaybackSessionItem,
   PlaybackSessionSource,
   Track,
@@ -16,6 +17,31 @@ export type PlaybackBoundary = {
 
 export function sortedPlaybackItems(items: PlaybackSessionItem[]) {
   return [...items].sort((left, right) => left.ordinal - right.ordinal);
+}
+
+export function mergePlaybackSessionTimeline(
+  current: PlaybackSession,
+  incoming: PlaybackSession,
+): PlaybackSession {
+  if (current.id !== incoming.id) return incoming;
+
+  const items = new Map(
+    current.items.map((item) => [item.ordinal, item] as const),
+  );
+  for (const item of incoming.items) items.set(item.ordinal, item);
+  const metadata =
+    incoming.revision >= current.revision ? incoming : current;
+
+  return {
+    ...metadata,
+    items: sortedPlaybackItems([...items.values()]),
+  };
+}
+
+export function playbackTimelineEnd(items: PlaybackSessionItem[]) {
+  const sorted = sortedPlaybackItems(items);
+  const last = sorted.at(-1);
+  return last ? (last.timeline_start_ms + last.duration_ms) / 1000 : 0;
 }
 
 export function findPlaybackBoundary(

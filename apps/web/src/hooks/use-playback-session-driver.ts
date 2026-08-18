@@ -5,6 +5,8 @@ import { APIError, api } from "../lib/api";
 import {
   createPlaybackSessionInput,
   findPlaybackBoundary,
+  mergePlaybackSessionTimeline,
+  playbackTimelineEnd,
   sortedPlaybackItems,
   sourceForPlaybackSession,
   timelinePositionFor,
@@ -30,6 +32,10 @@ const SESSION_REFRESH_MS = 60_000;
 const MAX_HLS_RECOVERY_ATTEMPTS = 4;
 const HLS_RECOVERY_DELAYS_MS = [0, 1_000, 3_000, 8_000] as const;
 const HLS_STALL_RECOVERY_DELAY_MS = 8_000;
+const HLS_TIMELINE_SYNC_MS = 500;
+const HLS_TIMELINE_REFRESH_RETRY_MS = 2_000;
+const HLS_PAUSE_RECONCILE_MS = 400;
+const HLS_FOREGROUND_SYNC_DELAYS_MS = [0, 250, 1_000] as const;
 const NATIVE_HLS_CANPLAY_TIMEOUT_MS = 12_000;
 export const ANDROID_NATIVE_HLS_PROBE_TIMEOUT_MS = 8_000;
 // Production keeps this disabled for the first rollout so the migration and
@@ -99,6 +105,7 @@ export function usePlaybackSessionDriver({
 }: DriverInput) {
   const [driver, setDriver] = useState<PlaybackDriver>("progressive");
   const [ready, setReady] = useState(true);
+  const readyRef = useRef(true);
   const [recoveryRequired, setRecoveryRequired] = useState(false);
   const [session, setSession] = useState<PlaybackSession | null>(null);
   const driverRef = useRef<PlaybackDriver>("progressive");
@@ -106,6 +113,13 @@ export function usePlaybackSessionDriver({
   const contextRef = useRef<string | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const requestRef = useRef<AbortController | null>(null);
+  const refreshPromiseRef = useRef<Promise<PlaybackSession | null> | null>(
+    null,
+  );
+  const refreshSessionIDRef = useRef<string | null>(null);
+  const refreshSessionRef = useRef<() => Promise<PlaybackSession | null>>(
+    async () => null,
+  );
   const recoveryTimerRef = useRef<number | null>(null);
   const recoveryAttemptsRef = useRef(0);
   const recoveryPositionRef = useRef(0);
@@ -117,6 +131,8 @@ export function usePlaybackSessionDriver({
   const nativeCanPlayTimerRef = useRef<number | null>(null);
   const nativeProbeFallbackRef = useRef<(() => void) | null>(null);
   const nativePlayPromiseRef = useRef(false);
+  const pauseReconcileTimerRef = useRef<number | null>(null);
+  const lastTimelineRefreshAtRef = useRef(0);
   const requestRecoveryRef = useRef<
     (message: string, stall?: boolean) => boolean
   >(() => false);
@@ -126,6 +142,11 @@ export function usePlaybackSessionDriver({
   const changeDriver = useCallback((next: PlaybackDriver) => {
     driverRef.current = next;
     setDriver(next);
+  }, []);
+
+  const changeReady = useCallback((next: boolean) => {
+    readyRef.current = next;
+    setReady(next);
   }, []);
 
   const clearNativeWaiters = useCallback(() => {
@@ -156,6 +177,13 @@ export function usePlaybackSessionDriver({
     if (resetAttempts) recoveryAttemptsRef.current = 0;
   }, []);
 
+  const clearPauseReconcile = useCallback(() => {
+    if (pauseReconcileTimerRef.current !== null) {
+      window.clearTimeout(pauseReconcileTimerRef.current);
+      pauseReconcileTimerRef.current = null;
+    }
+  }, []);
+
   const guardProgrammaticPause = useCallback(() => {
     suppressPauseRef.current = true;
     if (suppressPauseTimerRef.current !== null) {
@@ -181,6 +209,7 @@ export function usePlaybackSessionDriver({
     destroyHLS();
     nativeProbeFallbackRef.current = null;
     nativePlayPromiseRef.current = false;
+    clearPauseReconcile();
     sessionRef.current = null;
     setSession(null);
     contextRef.current = null;
@@ -193,7 +222,7 @@ export function usePlaybackSessionDriver({
       audio.load();
     }
     usePlayerStore.getState().clearPlaybackSession();
-    setReady(true);
+    changeReady(true);
     setRecoveryRequired(false);
     changeDriver("progressive");
     if (sessionID) {
@@ -204,6 +233,8 @@ export function usePlaybackSessionDriver({
   }, [
     audioRef,
     changeDriver,
+    changeReady,
+    clearPauseReconcile,
     clearRecovery,
     destroyHLS,
     guardProgrammaticPause,
@@ -214,28 +245,46 @@ export function usePlaybackSessionDriver({
       const audio = audioRef.current;
       const activeSession = sessionRef.current;
       if (!audio || !activeSession) return null;
+      if (
+        timelineSeconds === undefined &&
+        !readyRef.current &&
+        (!Number.isFinite(audio.currentTime) || audio.currentTime <= 0.05)
+      ) {
+        return null;
+      }
       const position =
         typeof timelineSeconds === "number" && Number.isFinite(timelineSeconds)
           ? timelineSeconds
           : audio.currentTime;
+      if (
+        activeSession.has_more &&
+        position > playbackTimelineEnd(activeSession.items) + 0.25
+      ) {
+        const player = usePlayerStore.getState();
+        if (Math.abs(player.playbackTimelineTime - position) > 0.25) {
+          player.setPlaybackSession(
+            activeSession.id,
+            queueContextId,
+            Math.max(0, position),
+          );
+        }
+        const now = Date.now();
+        if (
+          now - lastTimelineRefreshAtRef.current >=
+          HLS_TIMELINE_REFRESH_RETRY_MS
+        ) {
+          lastTimelineRefreshAtRef.current = now;
+          void refreshSessionRef.current();
+        }
+        return null;
+      }
       const boundary = findPlaybackBoundary(activeSession.items, position);
       if (!boundary) return null;
 
       const itemsSignature = `${activeSession.id}:${activeSession.revision}:${activeSession.items.length}`;
-      if (
+      const itemsChanged =
         lastOrdinalRef.current !== boundary.item.ordinal ||
-        lastItemsSignatureRef.current !== itemsSignature
-      ) {
-        lastOrdinalRef.current = boundary.item.ordinal;
-        lastItemsSignatureRef.current = itemsSignature;
-        const items = sortedPlaybackItems(activeSession.items);
-        usePlayerStore.getState().syncPlaybackSessionQueue(
-          items.map((item) => ({ ordinal: item.ordinal, track: item.track })),
-          boundary.item.ordinal,
-          boundary.localSeconds,
-          position,
-        );
-      }
+        lastItemsSignatureRef.current !== itemsSignature;
 
       const itemStart = boundary.item.timeline_start_ms / 1000;
       let buffered = boundary.localSeconds;
@@ -252,12 +301,26 @@ export function usePlaybackSessionDriver({
         }
       }
       const player = usePlayerStore.getState();
-      player.setPlaybackProgress(
-        boundary.localSeconds,
-        boundary.durationSeconds,
-        buffered,
-      );
-      player.setPlaybackSession(activeSession.id, queueContextId, position);
+      const items = itemsChanged
+        ? sortedPlaybackItems(activeSession.items).map((item) => ({
+            ordinal: item.ordinal,
+            track: item.track,
+          }))
+        : undefined;
+      player.syncPlaybackSessionTimeline({
+        id: activeSession.id,
+        queueContextId,
+        timelineTime: position,
+        currentOrdinal: boundary.item.ordinal,
+        currentTime: boundary.localSeconds,
+        duration: boundary.durationSeconds,
+        bufferedTo: buffered,
+        items,
+      });
+      if (itemsChanged) {
+        lastOrdinalRef.current = boundary.item.ordinal;
+        lastItemsSignatureRef.current = itemsSignature;
+      }
       return boundary;
     },
     [audioRef, queueContextId],
@@ -281,7 +344,7 @@ export function usePlaybackSessionDriver({
         syncTimeline(recoveryPositionRef.current);
       }
       setRecoveryRequired(true);
-      setReady(false);
+      changeReady(false);
       usePlayerStore.getState().setPlaybackStatus("retrying", message);
 
       if (typeof navigator !== "undefined" && !navigator.onLine) {
@@ -353,7 +416,7 @@ export function usePlaybackSessionDriver({
           }
           clearRecovery();
           setRecoveryRequired(false);
-          setReady(true);
+          changeReady(true);
         };
         nativeMetadataHandlerRef.current = onMetadata;
         nativeCanPlayHandlerRef.current = onCanPlay;
@@ -376,6 +439,7 @@ export function usePlaybackSessionDriver({
       audioRef,
       clearNativeWaiters,
       clearRecovery,
+      changeReady,
       fallBackToProgressive,
       guardProgrammaticPause,
       syncTimeline,
@@ -398,9 +462,10 @@ export function usePlaybackSessionDriver({
 
       clearRecovery();
       destroyHLS();
+      clearPauseReconcile();
       nativeProbeFallbackRef.current = null;
       nativePlayPromiseRef.current = false;
-      setReady(false);
+      changeReady(false);
       setRecoveryRequired(false);
       const previousSessionID = sessionRef.current?.id;
       sessionRef.current = nextSession;
@@ -408,6 +473,7 @@ export function usePlaybackSessionDriver({
       contextRef.current = queueContextId;
       lastOrdinalRef.current = null;
       lastItemsSignatureRef.current = null;
+      lastTimelineRefreshAtRef.current = 0;
       if (previousSessionID && previousSessionID !== nextSession.id) {
         void api.deletePlaybackSession(previousSessionID).catch(() => {
           // The server will remove an unreachable session after its idle TTL.
@@ -425,21 +491,23 @@ export function usePlaybackSessionDriver({
       const boundary = findPlaybackBoundary(nextSession.items, desiredPosition);
       if (boundary) {
         const items = sortedPlaybackItems(nextSession.items);
-        player.syncPlaybackSessionQueue(
-          items.map((item) => ({ ordinal: item.ordinal, track: item.track })),
-          boundary.item.ordinal,
-          boundary.localSeconds,
-          desiredPosition,
-        );
+        player.syncPlaybackSessionTimeline({
+          id: nextSession.id,
+          queueContextId,
+          timelineTime: desiredPosition,
+          currentOrdinal: boundary.item.ordinal,
+          currentTime: boundary.localSeconds,
+          duration: boundary.durationSeconds,
+          bufferedTo: 0,
+          items: items.map((item) => ({
+            ordinal: item.ordinal,
+            track: item.track,
+          })),
+          source,
+        });
         lastOrdinalRef.current = boundary.item.ordinal;
         lastItemsSignatureRef.current = `${nextSession.id}:${nextSession.revision}:${nextSession.items.length}`;
       }
-      player.setPlaybackSession(
-        nextSession.id,
-        queueContextId,
-        desiredPosition,
-        source,
-      );
 
       const seekWhenReady = (position = desiredPosition) => {
         if (sessionRef.current?.id !== nextSession.id) return;
@@ -465,7 +533,7 @@ export function usePlaybackSessionDriver({
             destroyHLS();
             audio.dataset.playbackSessionId = nextSession.id;
             changeDriver("hls-js");
-            setReady(false);
+            changeReady(false);
             const hls = new HLS({
               backBufferLength: 120,
               maxBufferLength: 600,
@@ -486,7 +554,7 @@ export function usePlaybackSessionDriver({
               fatalMediaRecoveries = 0;
               clearRecovery();
               setRecoveryRequired(false);
-              setReady(true);
+              changeReady(true);
             });
             hls.on(HLS.Events.ERROR, (_event, data) => {
               if (!data.fatal) return;
@@ -507,7 +575,7 @@ export function usePlaybackSessionDriver({
                   : recoveryPositionRef.current;
                 syncTimeline(recoveryPositionRef.current);
                 setRecoveryRequired(true);
-                setReady(false);
+                changeReady(false);
                 usePlayerStore
                   .getState()
                   .setPlaybackStatus("retrying", "Recovering audio playback…");
@@ -538,7 +606,7 @@ export function usePlaybackSessionDriver({
             clearNativeWaiters();
             guardProgrammaticPause();
             changeDriver("preparing");
-            setReady(false);
+            changeReady(false);
             audio.pause();
             audio.removeAttribute("src");
             audio.load();
@@ -561,7 +629,7 @@ export function usePlaybackSessionDriver({
           nativeProbeFallbackRef.current = null;
           clearRecovery();
           setRecoveryRequired(false);
-          setReady(true);
+          changeReady(true);
         };
         nativeMetadataHandlerRef.current = onMetadata;
         nativeCanPlayHandlerRef.current = onCanPlay;
@@ -591,7 +659,9 @@ export function usePlaybackSessionDriver({
     [
       audioRef,
       changeDriver,
+      changeReady,
       clearNativeWaiters,
+      clearPauseReconcile,
       clearRecovery,
       destroyHLS,
       fallBackToProgressive,
@@ -601,20 +671,39 @@ export function usePlaybackSessionDriver({
     ],
   );
 
-  const refreshSession = useCallback(async () => {
+  const refreshSession = useCallback(() => {
     const activeSession = sessionRef.current;
-    if (!activeSession) return null;
-    try {
-      const refreshed = await api.getPlaybackSession(activeSession.id);
-      if (sessionRef.current?.id !== refreshed.id) return null;
-      sessionRef.current = refreshed;
-      setSession(refreshed);
-      syncTimeline();
-      return refreshed;
-    } catch {
-      return null;
+    if (!activeSession) return Promise.resolve(null);
+    if (
+      refreshPromiseRef.current &&
+      refreshSessionIDRef.current === activeSession.id
+    ) {
+      return refreshPromiseRef.current;
     }
+    const request = api
+      .getPlaybackSession(activeSession.id)
+      .then((incoming) => {
+        const current = sessionRef.current;
+        if (!current || current.id !== incoming.id) return null;
+        const refreshed = mergePlaybackSessionTimeline(current, incoming);
+        sessionRef.current = refreshed;
+        setSession(refreshed);
+        syncTimeline();
+        return refreshed;
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (refreshPromiseRef.current === request) {
+          refreshPromiseRef.current = null;
+          refreshSessionIDRef.current = null;
+        }
+      });
+    refreshPromiseRef.current = request;
+    refreshSessionIDRef.current = activeSession.id;
+    return request;
   }, [syncTimeline]);
+
+  refreshSessionRef.current = refreshSession;
 
   useEffect(() => {
     if (!HLS_PLAYBACK_ENABLED) {
@@ -730,27 +819,75 @@ export function usePlaybackSessionDriver({
     queueContextId,
   ]);
 
+  const sessionID = session?.id ?? null;
+
   useEffect(() => {
-    if (!session) return;
-    const timer = isPlaying
+    if (!sessionID) return;
+    const sessionRefreshTimer = isPlaying
       ? window.setInterval(() => {
           void refreshSession();
         }, SESSION_REFRESH_MS)
       : null;
-    const refreshVisibleSession = () => {
-      if (document.visibilityState === "visible") {
-        syncTimeline();
-        void refreshSession();
+    // Browsers may throttle this timer in the background, but when they do
+    // keep JavaScript alive it also keeps Media Session metadata aligned with
+    // native HLS. Foreground lifecycle bursts below cover a fully frozen page.
+    const timelineSyncTimer = isPlaying
+      ? window.setInterval(() => syncTimeline(), HLS_TIMELINE_SYNC_MS)
+      : null;
+    const foregroundTimers = new Set<number>();
+    const reconcileVisibleSession = () => {
+      if (document.visibilityState === "hidden") return;
+      const expectedSessionID = sessionRef.current?.id;
+      void refreshSession();
+      for (const delay of HLS_FOREGROUND_SYNC_DELAYS_MS) {
+        const timer = window.setTimeout(() => {
+          foregroundTimers.delete(timer);
+          if (
+            document.visibilityState !== "hidden" &&
+            sessionRef.current?.id === expectedSessionID
+          ) {
+            syncTimeline();
+            if (
+              delay ===
+                HLS_FOREGROUND_SYNC_DELAYS_MS[
+                  HLS_FOREGROUND_SYNC_DELAYS_MS.length - 1
+                ] &&
+              audioRef.current?.paused &&
+              usePlayerStore.getState().isPlaying
+            ) {
+              scheduleRecovery(
+                "Playback was interrupted. Resuming playback…",
+              );
+            }
+          }
+        }, delay);
+        foregroundTimers.add(timer);
       }
     };
-    window.addEventListener("pageshow", refreshVisibleSession);
-    document.addEventListener("visibilitychange", refreshVisibleSession);
-    return () => {
-      if (timer !== null) window.clearInterval(timer);
-      window.removeEventListener("pageshow", refreshVisibleSession);
-      document.removeEventListener("visibilitychange", refreshVisibleSession);
+    const reconcileWhenVisible = () => {
+      if (document.visibilityState !== "hidden") reconcileVisibleSession();
     };
-  }, [isPlaying, refreshSession, session, syncTimeline]);
+    window.addEventListener("focus", reconcileVisibleSession);
+    window.addEventListener("pageshow", reconcileVisibleSession);
+    document.addEventListener("visibilitychange", reconcileWhenVisible);
+    return () => {
+      if (sessionRefreshTimer !== null) {
+        window.clearInterval(sessionRefreshTimer);
+      }
+      if (timelineSyncTimer !== null) window.clearInterval(timelineSyncTimer);
+      for (const timer of foregroundTimers) window.clearTimeout(timer);
+      window.removeEventListener("focus", reconcileVisibleSession);
+      window.removeEventListener("pageshow", reconcileVisibleSession);
+      document.removeEventListener("visibilitychange", reconcileWhenVisible);
+    };
+  }, [
+    audioRef,
+    isPlaying,
+    refreshSession,
+    scheduleRecovery,
+    sessionID,
+    syncTimeline,
+  ]);
 
   useEffect(() => {
     const resumeWhenOnline = () => {
@@ -779,6 +916,7 @@ export function usePlaybackSessionDriver({
       sessionRef.current = null;
       nativeProbeFallbackRef.current = null;
       nativePlayPromiseRef.current = false;
+      clearPauseReconcile();
       clearRecovery();
       destroyHLS();
       if (suppressPauseTimerRef.current !== null) {
@@ -797,7 +935,7 @@ export function usePlaybackSessionDriver({
         });
       }
     },
-    [clearRecovery, destroyHLS],
+    [clearPauseReconcile, clearRecovery, destroyHLS],
   );
 
   const seekLocal = useCallback(
@@ -876,7 +1014,7 @@ export function usePlaybackSessionDriver({
         }
         clearRecovery();
         setRecoveryRequired(false);
-        setReady(true);
+        changeReady(true);
         usePlayerStore.getState().setPlaybackStatus("playing");
       })
       .catch((reason: unknown) => {
@@ -895,7 +1033,7 @@ export function usePlaybackSessionDriver({
         scheduleRecovery("Connection lost during playback");
       });
     return true;
-  }, [audioRef, clearRecovery, scheduleRecovery]);
+  }, [audioRef, changeReady, clearRecovery, scheduleRecovery]);
 
   const handleMediaError = useCallback(() => {
     if (driverRef.current === "progressive") return false;
@@ -928,25 +1066,30 @@ export function usePlaybackSessionDriver({
       return true;
     }
     clearRecovery();
+    changeReady(true);
+    syncTimeline();
     nativeProbeFallbackRef.current = null;
     setRecoveryRequired(false);
-    setReady(true);
     return true;
-  }, [clearRecovery, scheduleRecovery]);
+  }, [changeReady, clearRecovery, scheduleRecovery, syncTimeline]);
 
   const handlePlaying = useCallback(() => {
     if (!sessionRef.current || driverRef.current === "progressive") return false;
+    clearPauseReconcile();
+    if (!usePlayerStore.getState().isPlaying) return true;
     if (suppressPauseTimerRef.current !== null) {
       window.clearTimeout(suppressPauseTimerRef.current);
       suppressPauseTimerRef.current = null;
     }
     suppressPauseRef.current = false;
     clearRecovery();
+    changeReady(true);
+    syncTimeline();
     nativeProbeFallbackRef.current = null;
     setRecoveryRequired(false);
-    setReady(true);
+    usePlayerStore.getState().setPlaybackStatus("playing");
     return true;
-  }, [clearRecovery]);
+  }, [changeReady, clearPauseReconcile, clearRecovery, syncTimeline]);
 
   const handlePause = useCallback(() => {
     if (!sessionRef.current || driverRef.current === "progressive") return false;
@@ -965,8 +1108,44 @@ export function usePlaybackSessionDriver({
       );
       return true;
     }
-    return false;
-  }, []);
+    if (!player.isPlaying) {
+      clearPauseReconcile();
+      return false;
+    }
+    clearPauseReconcile();
+    pauseReconcileTimerRef.current = window.setTimeout(() => {
+      pauseReconcileTimerRef.current = null;
+      const audio = audioRef.current;
+      const current = usePlayerStore.getState();
+      if (
+        sessionRef.current &&
+        driverRef.current !== "progressive" &&
+        current.isPlaying &&
+        audio?.paused
+      ) {
+        syncTimeline();
+        if (
+          suppressPauseRef.current ||
+          recoveryTimerRef.current !== null ||
+          waitingForOnlineRef.current ||
+          document.visibilityState === "hidden"
+        ) {
+          current.setPlaybackStatus(
+            "retrying",
+            waitingForOnlineRef.current
+              ? "You're offline. Playback will resume when the connection returns."
+              : "Playback was interrupted. Waiting to resume…",
+          );
+          return;
+        }
+        scheduleRecovery(
+          "Playback was interrupted. Reconnecting playback…",
+          true,
+        );
+      }
+    }, HLS_PAUSE_RECONCILE_MS);
+    return true;
+  }, [audioRef, clearPauseReconcile, scheduleRecovery, syncTimeline]);
 
   const handleEnded = useCallback(() => {
     if (!sessionRef.current) return false;
