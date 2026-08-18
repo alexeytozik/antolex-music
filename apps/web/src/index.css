@@ -134,24 +134,6 @@ button { -webkit-tap-highlight-color: transparent; }
 .desktop-only { display: none; }
 
 .admin-heading { align-items: center; }
-.admin-hls-panel { display: grid; gap: 12px; padding: 15px; border: 1px solid var(--line); border-radius: var(--radius-row); background: rgba(17,22,23,.72); }
-.admin-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.admin-section-heading h2 { margin: 2px 0 0; font-size: 1rem; letter-spacing: -.025em; }
-.admin-section-heading .eyebrow { margin: 0; }
-.admin-hls-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 7px; }
-.admin-hls-metrics span { min-width: 0; padding: 10px; border: 1px solid rgba(255,255,255,.06); background: rgba(255,255,255,.025); color: var(--muted); font-size: .62rem; }
-.admin-hls-metrics strong { display: block; margin-bottom: 3px; color: #edf3f1; font-size: 1rem; font-variant-numeric: tabular-nums; }
-.admin-hls-metrics .has-error strong { color: #ff9ca5; }
-.admin-hls-progress { margin: 0; color: var(--muted); font-size: .7rem; line-height: 1.5; }
-.admin-hls-failures { display: grid; gap: 7px; }
-.admin-hls-failure { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 12px; padding: 12px; border: 1px solid rgba(255,90,105,.15); background: rgba(255,90,105,.035); }
-.admin-hls-failure-copy { min-width: 0; }
-.admin-hls-failure-copy > strong, .admin-hls-failure-copy > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.admin-hls-failure-copy > strong { font-size: .76rem; }
-.admin-hls-failure-copy > span, .admin-hls-failure-copy > p { margin: 3px 0 0; color: var(--muted); font-size: .64rem; }
-.admin-hls-failure-copy details { margin-top: 7px; color: #87918f; font-size: .62rem; }
-.admin-hls-failure-copy summary { cursor: pointer; }
-.admin-hls-failure-copy code { display: block; max-height: 74px; margin-top: 5px; overflow: auto; white-space: pre-wrap; color: #b3bcba; font-size: .6rem; line-height: 1.4; }
 .admin-user-list { display: grid; gap: 8px; }
 .admin-user-row { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 13px; border: 1px solid var(--line); border-radius: var(--radius-row); background: rgba(17,22,23,.72); }
 .admin-user-copy { min-width: 0; }
@@ -299,8 +281,6 @@ button { -webkit-tap-highlight-color: transparent; }
   .desktop-track-play:hover { color: var(--mint); border-color: rgba(46,230,184,.48); }
   .desktop-only { display: inline-flex; }
   .admin-view { gap: 14px; }
-  .admin-hls-panel { padding: 17px; }
-  .admin-section-heading h2 { font-size: 1.15rem; }
   .admin-heading h1 { color: #f3f7f6; font-size: 1.35rem; font-weight: 750; letter-spacing: -.035em; }
   .admin-heading .eyebrow { display: block; }
   .admin-heading .count-pill { margin-left: auto; }

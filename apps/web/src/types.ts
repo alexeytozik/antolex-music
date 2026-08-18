@@ -96,36 +96,6 @@ export type AdminUsersResponse = {
   next_cursor?: string;
 };
 
-export type AdminHLSBackfillSummary = {
-  ready_tracks: number;
-  hls_ready: number;
-  preparing: number;
-  failed: number;
-  missing: number;
-  complete: boolean;
-};
-
-export type AdminHLSBackfillFailure = {
-  track_id: string;
-  external_id: string;
-  title: string;
-  artist: string;
-  attempts: number;
-  error: string;
-  failed_at: string;
-};
-
-export type AdminHLSBackfillResponse = {
-  summary: AdminHLSBackfillSummary;
-  failures: AdminHLSBackfillFailure[];
-};
-
-export type AdminHLSRetryResponse = {
-  track_id: string;
-  status: "pending" | "running";
-  message: string;
-};
-
 export type AuthSession = {
   token?: string;
   user: User;
