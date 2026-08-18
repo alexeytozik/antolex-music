@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 
 import { HeartIcon, PauseIcon, PlayIcon, SpinnerIcon } from "./Icons";
 import { formatDuration } from "../lib/format";
+import { requestPlaybackActivation } from "../lib/playback-activation";
 import {
   startQueueContinuation,
   stopQueueContinuation,
@@ -51,9 +52,15 @@ export function TrackCard({
   function handlePlay() {
     const player = usePlayerStore.getState();
     if (selectCurrentItem(player)?.track.external_id === track.external_id) {
+      if (!player.isPlaying) requestPlaybackActivation(track.external_id);
       player.togglePlayback();
       return;
     }
+
+    // Keep the first media call inside the original click. In particular,
+    // iOS does not promise that user activation survives the asynchronous HLS
+    // session request that follows this queue change.
+    requestPlaybackActivation(track.external_id);
 
     if (queue && typeof queueIndex === "number") {
       replaceQueue(queue, queueIndex, true);

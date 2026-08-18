@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   ChevronDownIcon,
@@ -13,6 +13,7 @@ import {
 } from "./Icons";
 import { api } from "../lib/api";
 import { formatDuration } from "../lib/format";
+import { registerPlaybackActivationHandler } from "../lib/playback-activation";
 import { usePlaybackSessionDriver } from "../hooks/use-playback-session-driver";
 import {
   classifyMediaError,
@@ -30,6 +31,9 @@ import {
 } from "../store/player-store";
 import { useQueueContinuationStore } from "../store/queue-continuation-store";
 
+const SILENT_PLAYBACK_ACTIVATION_SOURCE =
+  "data:audio/wav;base64,UklGRtYBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgATElTVBoAAABJTkZPSVNGVA4AAABMYXZmNjIuMTIuMTAyAGRhdGGQAQAAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==";
+
 function bufferedTo(audio: HTMLAudioElement) {
   return audio.buffered.length ? audio.buffered.end(audio.buffered.length - 1) : 0;
 }
@@ -44,6 +48,7 @@ type PlaybackRecovery = {
 
 export function Player() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const playbackActivatedRef = useRef(false);
   const retryTimerRef = useRef<number | null>(null);
   const onlineHandlerRef = useRef<(() => void) | null>(null);
   const resolveAbortRef = useRef<AbortController | null>(null);
@@ -99,6 +104,47 @@ export function Player() {
     queueContextId: playerQueueContextId,
     isPlaying,
   });
+
+  useLayoutEffect(
+    () =>
+      registerPlaybackActivationHandler((externalID) => {
+        const audio = audioRef.current;
+        if (!audio) return;
+
+        const player = usePlayerStore.getState();
+        const item = selectCurrentItem(player);
+        const belongsToRequestedTrack =
+          item?.track.external_id === externalID &&
+          (audio.dataset.queueId === item.queueId ||
+            (Boolean(player.playbackSessionId) &&
+              audio.dataset.playbackSessionId === player.playbackSessionId));
+
+        if (belongsToRequestedTrack && audio.getAttribute("src")) {
+          playbackActivatedRef.current = true;
+          void audio.play().catch(() => {
+            // The regular player path reports a useful error after the store
+            // receives the same play intent.
+          });
+          return;
+        }
+        if (playbackActivatedRef.current) return;
+
+        audio.dataset.playbackActivation = externalID;
+        delete audio.dataset.queueId;
+        delete audio.dataset.playbackSessionId;
+        delete audio.dataset.streamUrl;
+        delete audio.dataset.resolvedAt;
+        audio.src = SILENT_PLAYBACK_ACTIVATION_SOURCE;
+        audio.load();
+        playbackActivatedRef.current = true;
+        void audio.play().catch(() => {
+          if (audio.dataset.playbackActivation === externalID) {
+            playbackActivatedRef.current = false;
+          }
+        });
+      }),
+    [],
+  );
   const hasNext = sessionDriver.isHLS
     ? Boolean(
         sessionDriver.session?.has_more || currentIndex + 1 < queueLength,
@@ -401,6 +447,7 @@ export function Player() {
       audio.dataset.queueId = currentItem.queueId;
       audio.dataset.streamUrl = track.stream_url;
       audio.dataset.resolvedAt = resolvedAt;
+      delete audio.dataset.playbackActivation;
       audio.src = track.stream_url;
       audio.load();
     }
@@ -409,6 +456,20 @@ export function Player() {
   useEffect(() => {
     const audio = audioRef.current;
     const hlsSessionID = sessionDriver.session?.id;
+    if (
+      sessionDriver.blocksProgressive &&
+      (!sessionDriver.isHLS || !sessionDriver.ready)
+    ) {
+      if (isPlaying && sessionDriver.recoveryRequired) {
+        sessionDriver.handlePlaybackFailure("Reconnecting playback…");
+      } else if (isPlaying) {
+        sessionDriver.requestNativePlay();
+      }
+      return;
+    }
+    if (!sessionDriver.isHLS && audio?.dataset.playbackSessionId) {
+      return;
+    }
     if (
       !audio ||
       (sessionDriver.isHLS
@@ -447,8 +508,7 @@ export function Player() {
           return;
         }
         if (sessionDriver.isHLS && isRetryablePlaybackRequestError(reason)) {
-          setPlaybackStatus(
-            "retrying",
+          sessionDriver.handlePlaybackFailure(
             playbackErrorMessage(reason, "Connection lost during playback"),
           );
           return;
@@ -469,7 +529,12 @@ export function Player() {
     currentItem?.queueId,
     currentItem?.resolvedAt,
     isPlaying,
+    sessionDriver.blocksProgressive,
+    sessionDriver.handlePlaybackFailure,
     sessionDriver.isHLS,
+    sessionDriver.ready,
+    sessionDriver.recoveryRequired,
+    sessionDriver.requestNativePlay,
     sessionDriver.session?.id,
     setPlaybackStatus,
     track?.stream_url,
@@ -492,7 +557,16 @@ export function Player() {
       artwork: track.cover_url ? [{ src: track.cover_url }] : undefined,
     });
     const handlers: Array<[MediaSessionAction, MediaSessionActionHandler]> = [
-      ["play", () => { if (!usePlayerStore.getState().isPlaying) togglePlayback(); }],
+      ["play", () => {
+        if (!usePlayerStore.getState().isPlaying) {
+          togglePlayback();
+          if (!sessionDriver.recoveryRequired) {
+            sessionDriver.requestNativePlay();
+          }
+        } else if (audioRef.current?.paused && sessionDriver.isHLS) {
+          sessionDriver.handlePlaybackFailure("Reconnecting playback…");
+        }
+      }],
       ["pause", () => { if (usePlayerStore.getState().isPlaying) togglePlayback(); }],
       ["previoustrack", () => { previousTrack(); }],
       ["nexttrack", () => { void nextTrack(); }],
@@ -502,17 +576,19 @@ export function Player() {
     ];
     handlers.forEach(([action, handler]) => { try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* Unsupported action. */ } });
     return () => handlers.forEach(([action]) => { try { navigator.mediaSession.setActionHandler(action, null); } catch { /* Unsupported action. */ } });
-  }, [sessionDriver.isHLS, togglePlayback, track]);
+  }, [sessionDriver.handlePlaybackFailure, sessionDriver.isHLS, sessionDriver.recoveryRequired, sessionDriver.requestNativePlay, togglePlayback, track]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
-    navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
+    navigator.mediaSession.playbackState =
+      isPlaying && status === "playing" ? "playing" : "paused";
     if (displayDuration > 0 && Number.isFinite(displayDuration) && currentTime <= displayDuration) {
       try { navigator.mediaSession.setPositionState({ duration: displayDuration, playbackRate: 1, position: Math.max(0, currentTime) }); } catch { /* Metadata may not be ready yet. */ }
     }
-  }, [currentTime, displayDuration, isPlaying]);
+  }, [currentTime, displayDuration, isPlaying, status]);
 
   function updateProgress() {
+    if (audioRef.current?.dataset.playbackActivation) return;
     if (sessionDriver.isHLS) {
       sessionDriver.syncTimeline();
       return;
@@ -527,6 +603,7 @@ export function Player() {
   }
   function loaded() {
     const audio = audioRef.current;
+    if (audio?.dataset.playbackActivation) return;
     if (sessionDriver.isHLS) {
       sessionDriver.syncTimeline();
       return;
@@ -538,6 +615,10 @@ export function Player() {
   }
   function onPlaying() {
     const audio = audioRef.current;
+    if (audio?.dataset.playbackActivation) {
+      playbackActivatedRef.current = true;
+      return;
+    }
     const player = usePlayerStore.getState();
     const item = selectCurrentItem(player);
     if (!audio || !item || !player.isPlaying) {
@@ -550,10 +631,45 @@ export function Player() {
     ) {
       return;
     }
+    sessionDriver.handlePlaying();
     cancelRecovery();
     setPlaybackStatus("playing");
   }
+  function onPause() {
+    if (audioRef.current?.dataset.playbackActivation) return;
+    if (sessionDriver.handlePause()) return;
+    const audio = audioRef.current;
+    const player = usePlayerStore.getState();
+    const item = selectCurrentItem(player);
+    if (!audio || !item) return;
+    // Assigning a new progressive source emits `pause` while the element is
+    // empty. That is a source transition, not a user or system pause.
+    if (!sessionDriver.isHLS && audio.readyState === HTMLMediaElement.HAVE_NOTHING) {
+      return;
+    }
+    const belongsToCurrentSource = sessionDriver.isHLS
+      ? audio.dataset.playbackSessionId === sessionDriver.session?.id
+      : audio.dataset.queueId === item.queueId;
+    if (belongsToCurrentSource && player.isPlaying) {
+      setPlaybackStatus("paused");
+    }
+  }
+  function onWaiting() {
+    if (audioRef.current?.dataset.playbackActivation) return;
+    sessionDriver.handleBuffering("Buffering audio…");
+  }
+  function onStalled() {
+    if (audioRef.current?.dataset.playbackActivation) return;
+    sessionDriver.handleBuffering(
+      "The connection was interrupted. Reconnecting playback…",
+    );
+  }
+  function onCanPlay() {
+    if (audioRef.current?.dataset.playbackActivation) return;
+    sessionDriver.handleCanPlay();
+  }
   function onError() {
+    if (audioRef.current?.dataset.playbackActivation) return;
     if (sessionDriver.handleMediaError()) return;
     const audio = audioRef.current;
     const item = selectCurrentItem(usePlayerStore.getState());
@@ -569,6 +685,7 @@ export function Player() {
     finishRecovery(message);
   }
   function onEnded() {
+    if (audioRef.current?.dataset.playbackActivation) return;
     if (sessionDriver.handleEnded()) return;
     const audio = audioRef.current;
     const player = usePlayerStore.getState();
@@ -608,10 +725,17 @@ export function Player() {
     setVolume(value);
     if (muted) setMuted(false);
   }
+  function togglePlaybackFromControl() {
+    const starting = !usePlayerStore.getState().isPlaying;
+    togglePlayback();
+    if (starting && !sessionDriver.recoveryRequired) {
+      sessionDriver.requestNativePlay();
+    }
+  }
 
   return (
     <>
-      <audio ref={audioRef} preload="auto" onLoadedMetadata={loaded} onPlaying={onPlaying} onTimeUpdate={updateProgress} onProgress={updateProgress} onEnded={onEnded} onError={onError} />
+      <audio ref={audioRef} preload="auto" onLoadedMetadata={loaded} onCanPlay={onCanPlay} onPlaying={onPlaying} onPause={onPause} onWaiting={onWaiting} onStalled={onStalled} onTimeUpdate={updateProgress} onProgress={updateProgress} onEnded={onEnded} onError={onError} />
       <div className="mobile-player-ui">
         {track && (
           <div className="mini-player">
@@ -620,7 +744,7 @@ export function Player() {
               <span><strong>{track.title}</strong><small>{track.artist}</small></span>
               {(status === "resolving" || status === "retrying") && <SpinnerIcon className="h-5 w-5 animate-spin" />}
             </button>
-            <button className="player-button" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"} aria-keyshortcuts="Space">{isPlaying ? <PauseIcon className="h-6 w-6" /> : <PlayIcon className="h-6 w-6" />}</button>
+            <button className="player-button" type="button" onClick={togglePlaybackFromControl} aria-label={isPlaying ? "Pause" : "Play"} aria-keyshortcuts="Space">{isPlaying ? <PauseIcon className="h-6 w-6" /> : <PlayIcon className="h-6 w-6" />}</button>
             <button className="player-button mobile-next" type="button" onClick={() => { void nextTrack(); }} disabled={!hasNext} aria-label="Next track"><NextIcon className="h-6 w-6" /></button>
             <div className="mini-progress"><span style={{ width: `${progressPercent}%` }} /></div>
           </div>
@@ -636,7 +760,7 @@ export function Player() {
               <div className="full-controls">
                 <button className={`player-button ${shuffle ? "active" : ""}`} type="button" onClick={() => setShuffle(!shuffle)} aria-label="Shuffle" aria-pressed={shuffle}><ShuffleIcon className="h-6 w-6" /></button>
                 <button className="player-button" type="button" onClick={previousTrack} disabled={!hasPrevious} aria-label="Previous"><PreviousIcon className="h-7 w-7" /></button>
-                <button ref={fullPlayRef} className="play-main" type="button" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"} aria-keyshortcuts="Space">{isPlaying ? <PauseIcon className="h-8 w-8" /> : <PlayIcon className="h-8 w-8" />}</button>
+                <button ref={fullPlayRef} className="play-main" type="button" onClick={togglePlaybackFromControl} aria-label={isPlaying ? "Pause" : "Play"} aria-keyshortcuts="Space">{isPlaying ? <PauseIcon className="h-8 w-8" /> : <PlayIcon className="h-8 w-8" />}</button>
                 <button className="player-button" type="button" onClick={() => { void nextTrack(); }} disabled={!hasNext} aria-label="Next"><NextIcon className="h-7 w-7" /></button>
                 <span className="control-spacer" />
               </div>
@@ -662,7 +786,7 @@ export function Player() {
             <div className="desktop-player-controls">
               <button className={`player-button ${shuffle ? "active" : ""}`} type="button" onClick={() => setShuffle(!shuffle)} disabled={!track} aria-label="Shuffle" aria-pressed={shuffle}><ShuffleIcon className="h-6 w-6" /></button>
               <button className="player-button outlined" type="button" onClick={previousTrack} disabled={!hasPrevious} aria-label="Previous"><PreviousIcon className="h-6 w-6" /></button>
-              <button className="play-main desktop-play-main" type="button" onClick={togglePlayback} disabled={!track} aria-label={isPlaying ? "Pause" : "Play"} aria-keyshortcuts="Space">{isPlaying ? <PauseIcon className="h-7 w-7" /> : <PlayIcon className="h-7 w-7" />}</button>
+              <button className="play-main desktop-play-main" type="button" onClick={togglePlaybackFromControl} disabled={!track} aria-label={isPlaying ? "Pause" : "Play"} aria-keyshortcuts="Space">{isPlaying ? <PauseIcon className="h-7 w-7" /> : <PlayIcon className="h-7 w-7" />}</button>
               <button className="player-button outlined" type="button" onClick={() => { void nextTrack(); }} disabled={!hasNext} aria-label="Next"><NextIcon className="h-6 w-6" /></button>
             </div>
 

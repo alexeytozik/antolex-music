@@ -118,6 +118,8 @@ func newApp(s *Server) *fiber.App {
 	secured.Delete("/me/likes/:externalID", s.removeLike)
 	secured.Get("/admin/users", s.adminMiddleware, s.listAdminUsers)
 	secured.Patch("/admin/users/:id", s.adminMiddleware, s.updateAdminUserStatus)
+	secured.Get("/admin/hls-backfill", s.adminMiddleware, s.getAdminHLSBackfill)
+	secured.Post("/admin/hls-backfill/:trackID/retry", s.adminMiddleware, s.retryAdminHLSBackfill)
 	playbackSessions := secured.Group("/me/playback-sessions")
 	playbackSessions.Post("", s.createPlaybackSession)
 	playbackSessions.Get("/:id", s.getPlaybackSession)

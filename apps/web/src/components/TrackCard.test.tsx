@@ -7,6 +7,14 @@ import { usePlayerStore } from "../store/player-store";
 import type { Track } from "../types";
 import { TrackCard } from "./TrackCard";
 
+const playbackActivation = vi.hoisted(() => ({
+  request: vi.fn(),
+}));
+
+vi.mock("../lib/playback-activation", () => ({
+  requestPlaybackActivation: playbackActivation.request,
+}));
+
 const mountedRoots: Root[] = [];
 
 function makeTrack(index: number): Track {
@@ -62,6 +70,7 @@ afterEach(() => {
   while (mountedRoots.length) mountedRoots.pop()?.unmount();
   document.body.replaceChildren();
   usePlayerStore.setState(usePlayerStore.getInitialState(), true);
+  playbackActivation.request.mockReset();
   vi.restoreAllMocks();
 });
 
@@ -82,6 +91,7 @@ describe("TrackCard playback controls", () => {
     click(playButton);
 
     expect(togglePlayback).toHaveBeenCalledTimes(1);
+    expect(playbackActivation.request).not.toHaveBeenCalled();
     expect(replaceQueue).not.toHaveBeenCalled();
     expect(usePlayerStore.getState()).toMatchObject({
       currentTime: 42,
@@ -108,6 +118,9 @@ describe("TrackCard playback controls", () => {
     expect(playButton?.getAttribute("aria-label")).toBe("Play Track 1");
     click(playButton);
 
+    expect(playbackActivation.request).toHaveBeenCalledWith(
+      currentTrack.external_id,
+    );
     expect(togglePlayback).toHaveBeenCalledTimes(1);
     expect(replaceQueue).not.toHaveBeenCalled();
     expect(usePlayerStore.getState()).toMatchObject({
@@ -133,6 +146,9 @@ describe("TrackCard playback controls", () => {
     expect(playButton?.getAttribute("aria-label")).toBe("Play Track 2");
     click(playButton);
 
+    expect(playbackActivation.request).toHaveBeenCalledWith(
+      selectedTrack.external_id,
+    );
     expect(togglePlayback).not.toHaveBeenCalled();
     expect(replaceQueue).toHaveBeenCalledTimes(1);
     expect(replaceQueue).toHaveBeenCalledWith(displayedQueue, 0, true);

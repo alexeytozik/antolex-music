@@ -93,9 +93,12 @@ post-copy SHA-256 verification exactly as documented in
 A push to `main`, or a manual `workflow_dispatch` explicitly run from `main`, deploys only after all three checks pass. Production deployments are serialized and never cancel an active deployment.
 
 Regular pushes leave `HLS_PLAYBACK_ENABLED` in the shared production environment
-unchanged. For a staged manual deployment, select `keep`, `false`, or `true` in
-the Actions form. The equivalent CLI command for the initial fallback-only
-release is:
+unchanged. A push to `main` whose HEAD commit message contains the exact,
+case-sensitive marker `[enable-hls]` is the non-UI opt-in equivalent of selecting
+`true`. The marker is ignored on pull requests and is not inherited from an
+earlier commit in a multi-commit push. For a staged manual deployment, select
+`keep`, `false`, or `true` in the Actions form. The equivalent CLI command for
+the initial fallback-only release is:
 
 ```bash
 gh workflow run ci-deploy.yml \
@@ -107,17 +110,39 @@ gh workflow run ci-deploy.yml \
 The workflow validates the value and atomically changes only
 `HLS_PLAYBACK_ENABLED` in `shared/.env`, preserving mode `600`, immediately
 before the remote Compose build. The `keep` choice performs no environment
-write.
+write. Before either a manual `true` or `[enable-hls]` can change the file, a
+read-only PostgreSQL guard requires `hls_ready = ready_tracks`,
+`hls_missing = 0`, and `hls_failed = 0`. The workflow logs only those four
+aggregate counts; it never prints `shared/.env` or a secret value.
+
+An explicit `false` or `true` deployment keeps a mode-`600` temporary copy of
+the prior shared environment for the duration of the deploy, post-deploy SQL
+check, and public HTTPS checks. Any failure restores the previous file and
+rebuilds the release identified by `current`; success removes the temporary
+copy. The copy is paired with a per-run ownership marker, so cleanup can still
+recognize and restore it if SSH disconnects after the environment was changed;
+backup files not owned by that exact run are never restored or removed. This
+recovery is scoped to the HLS flag and does not replace the general application
+rollback procedure below.
 
 The deploy job uses only the system `ssh` and `scp` clients. It verifies the pinned host key, uploads a SHA-256-checked `git archive`, extracts a unique release directory, links the shared `.env`, and validates Compose. If an `antolex-music` PostgreSQL container already exists, deployment stops unless it is running.
 
-The workflow then runs `sudo docker compose --profile production up -d --build --remove-orphans` and waits up to five minutes for all of these checks:
+The remote deploy script runs
+`sudo docker compose --profile production up -d --build --remove-orphans` and
+waits up to five minutes for its local HTTP and service checks:
 
 - `http://127.0.0.1:8080/api/v1/health`;
 - `http://127.0.0.1:5173/`;
-- `https://music.antolex.net/api/v1/health` through local Caddy with certificate verification.
+- all six Compose services in the `running` state.
 
-Only then is `current` atomically switched to the new release. On failure it keeps the old symlink and, when an older release is known, attempts to restore that release's Compose stack. Failed release directories remain available for diagnosis.
+Only then is `current` atomically switched to the new release. The Actions job
+next reads and prints the four HLS readiness counts over SSH and verifies public
+HTTPS for the API, web root, favicon, and wordmark. On a failure inside the
+remote deploy script it keeps the old symlink and, when an older release is
+known, attempts to restore that release's Compose stack. Failed release
+directories remain available for diagnosis. A general public HTTPS failure
+after `current` changed still requires the manual application rollback below;
+when the job changed the HLS flag, its separate flag recovery runs first.
 
 After a successful deployment, verify the Actions run and then check a sign-in flow on one iPhone and one Android phone: request/resend code, search, like, upload a small file, wait for processing, play with the screen locked, and use headset play/pause/next controls.
 
@@ -185,10 +210,21 @@ SELECT
 SQL
 ```
 
-Do not enable HLS until `hls_ready = ready_tracks`, `hls_missing = 0`, and
-`hls_failed = 0`. Spot-check the generated CMAF objects and a three-track HLS
-session, then run the second staged deployment so Vite bakes the flag into the
-web image:
+Every successful deployment prints these same four read-only counts in its
+Actions log. Do not enable HLS until `hls_ready = ready_tracks`,
+`hls_missing = 0`, and `hls_failed = 0`. Spot-check the generated CMAF objects
+and a three-track HLS session, then run the second staged deployment so Vite
+bakes the flag into the web image. If Actions/CLI workflow dispatch is not
+available, use a dedicated marker commit:
+
+```bash
+git commit --allow-empty -m "feat: enable HLS playback [enable-hls]"
+git push origin main
+```
+
+The marker path runs the complete frontend, backend, and image test jobs and
+the same remote SQL guard as manual `true`. It is not a way to bypass readiness.
+When workflow dispatch is available, the equivalent command is:
 
 ```bash
 gh workflow run ci-deploy.yml \

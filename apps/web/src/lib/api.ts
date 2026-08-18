@@ -1,5 +1,7 @@
 import type {
   AccessStatus,
+  AdminHLSBackfillResponse,
+  AdminHLSRetryResponse,
   AdminUser,
   AdminUsersResponse,
   APIErrorPayload,
@@ -155,6 +157,15 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ status }),
     });
+  },
+  getAdminHLSBackfill(signal?: AbortSignal) {
+    return request<AdminHLSBackfillResponse>("/admin/hls-backfill", { signal });
+  },
+  retryAdminHLSBackfill(trackId: string) {
+    return request<AdminHLSRetryResponse>(
+      `/admin/hls-backfill/${encodeURIComponent(trackId)}/retry`,
+      { method: "POST" },
+    );
   },
   searchWithCursor(
     query: string,

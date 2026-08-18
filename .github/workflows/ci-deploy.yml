@@ -182,6 +182,19 @@ jobs:
           HLS_PLAYBACK_ROLLOUT: ${{ github.event.inputs.hls_playback_enabled || 'keep' }}
         run: |
           set -euo pipefail
+
+          # A regular push preserves the current production setting. The exact,
+          # case-sensitive marker in the pushed HEAD commit is the non-UI opt-in
+          # equivalent of selecting "true" in workflow_dispatch.
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            HLS_PLAYBACK_ROLLOUT=keep
+            head_commit_message="$(git log -1 --format=%B "${GITHUB_SHA}")"
+            if [[ "${head_commit_message}" == *"[enable-hls]"* ]]; then
+              HLS_PLAYBACK_ROLLOUT=true
+            fi
+            unset head_commit_message
+          fi
+
           for variable in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
             if [[ -z "${!variable:-}" ]]; then
               printf '::error::Required secret %s is not configured.\n' "${variable}" >&2
@@ -219,28 +232,84 @@ jobs:
           )
           remote="${DEPLOY_USER}@${DEPLOY_HOST}"
           remote_root="/home/atozik/antolex-music"
+          rollback_token="$(openssl rand -hex 16)"
+          hls_backup_created=0
+          hls_rollout_attempted=0
+
+          cleanup() {
+            status=$?
+            trap - EXIT
+            if (( status != 0 && hls_rollout_attempted == 1 )); then
+              printf 'HLS rollout failed; restoring the previous production flag.\n' >&2
+              if ! ssh "${ssh_options[@]}" "${remote}" \
+                bash -s -- "${RELEASE_ID}" "${rollback_token}" <<'REMOTE_RESTORE'
+          set -euo pipefail
+          release_id="$1"
+          rollback_token="$2"
+          root=/home/atozik/antolex-music
+          shared_env="${root}/shared/.env"
+          backup_env="${root}/shared/.env.hls-backup-${release_id}"
+          backup_marker="${backup_env}.owner"
+
+          if [[ ! -e "${backup_marker}" && ! -L "${backup_marker}" ]]; then
+            printf 'No HLS environment backup owned by this deployment was found; leaving the environment unchanged.\n' >&2
+            exit 0
+          fi
+          if [[ ! -f "${backup_marker}" || -L "${backup_marker}" ]]; then
+            printf 'The HLS backup ownership marker is unsafe; leaving it untouched.\n' >&2
+            exit 0
+          fi
+          marker_owner=""
+          IFS= read -r marker_owner <"${backup_marker}" || true
+          if [[ "${marker_owner}" != "${rollback_token}" ]]; then
+            printf 'The HLS backup belongs to another deployment; leaving it untouched.\n' >&2
+            exit 0
+          fi
+          if [[ ! -f "${backup_env}" || -L "${backup_env}" ]]; then
+            printf 'The owned HLS environment backup is missing or unsafe; manual recovery is required.\n' >&2
+            exit 1
+          fi
+          mv -f -- "${backup_env}" "${shared_env}"
+          chmod 600 "${shared_env}"
+          rm -f -- "${backup_marker}"
+
+          current_link="${root}/current"
+          if [[ -L "${current_link}" ]]; then
+            current_release="$(readlink -f "${current_link}")"
+            if [[ -d "${current_release}" ]]; then
+              cd "${current_release}"
+              sudo -n docker compose \
+                --env-file "${shared_env}" \
+                --project-directory "${current_release}" \
+                -f "${current_release}/docker-compose.yml" \
+                --profile production up -d --build --remove-orphans \
+                --wait --wait-timeout 300
+            fi
+          fi
+          REMOTE_RESTORE
+              then
+                printf '::error::Failed to restore the previous HLS setting; manual recovery is required.\n' >&2
+              fi
+            fi
+            rm -f -- "${key_path}"
+            exit "${status}"
+          }
+          trap cleanup EXIT
 
           ssh "${ssh_options[@]}" "${remote}" \
             'install -d -m 755 /home/atozik/antolex-music/incoming /home/atozik/antolex-music/releases; install -d -m 700 /home/atozik/antolex-music/shared'
-          scp -q "${ssh_options[@]}" \
-            "${RELEASE_ARCHIVE}" "${RELEASE_ARCHIVE}.sha256" \
-            "${remote}:${remote_root}/incoming/"
 
-          deploy_script="deploy-${RELEASE_ID}.sh"
-          scp -q "${ssh_options[@]}" \
-            ./scripts/deploy-production.sh \
-            "${remote}:${remote_root}/incoming/${deploy_script}"
-
-          # A push resolves to "keep" and does not touch the shared environment.
-          # Manual false/true changes only HLS_PLAYBACK_ENABLED, atomically.
-          ssh "${ssh_options[@]}" "${remote}" \
-            bash -s -- "${HLS_PLAYBACK_ROLLOUT}" <<'REMOTE_HLS'
+          # false is an explicit rollback switch. true (manual or marker) must
+          # pass the same read-only PostgreSQL gate before the shared flag moves.
+          if [[ "${HLS_PLAYBACK_ROLLOUT}" != "keep" ]]; then
+            hls_rollout_attempted=1
+            ssh "${ssh_options[@]}" "${remote}" \
+              bash -s -- "${HLS_PLAYBACK_ROLLOUT}" "${RELEASE_ID}" "${rollback_token}" <<'REMOTE_HLS'
           set -euo pipefail
           rollout="$1"
+          release_id="$2"
+          rollback_token="$3"
           case "${rollout}" in
-            keep)
-              exit 0
-              ;;
             false|true) ;;
             *)
               printf 'Invalid HLS playback rollout value.\n' >&2
@@ -248,7 +317,11 @@ jobs:
               ;;
           esac
 
-          shared_env=/home/atozik/antolex-music/shared/.env
+          root=/home/atozik/antolex-music
+          shared_env="${root}/shared/.env"
+          current_link="${root}/current"
+          backup_env="${root}/shared/.env.hls-backup-${release_id}"
+          backup_marker="${backup_env}.owner"
           if [[ ! -f "${shared_env}" ]]; then
             printf 'Missing shared production environment.\n' >&2
             exit 1
@@ -257,17 +330,121 @@ jobs:
             printf 'Shared production environment must have mode 600.\n' >&2
             exit 1
           fi
+          if [[ -e "${backup_env}" || -L "${backup_env}" || -e "${backup_marker}" || -L "${backup_marker}" ]]; then
+            printf 'Refusing to overwrite an existing HLS environment backup or ownership marker.\n' >&2
+            exit 1
+          fi
+
+          if [[ "${rollout}" == true ]]; then
+            if [[ ! -L "${current_link}" ]]; then
+              printf 'HLS cannot be enabled before the fallback-only release is active.\n' >&2
+              exit 1
+            fi
+            current_release="$(readlink -f "${current_link}")"
+            if [[ ! -d "${current_release}" ]]; then
+              printf 'The active release link is invalid.\n' >&2
+              exit 1
+            fi
+            counts="$(
+              cd "${current_release}"
+              sudo -n docker compose \
+                --env-file "${shared_env}" \
+                --project-directory "${current_release}" \
+                -f "${current_release}/docker-compose.yml" \
+                --profile production exec -T postgres \
+                sh -ec 'psql -X -v ON_ERROR_STOP=1 -qAt -F "|" -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+          SELECT
+            COUNT(*) AS ready_tracks,
+            COUNT(*) FILTER (WHERE EXISTS (
+              SELECT 1 FROM track_playback_assets asset
+              WHERE asset.track_id=track.id
+                AND asset.status='ready'
+                AND asset.retired_at IS NULL
+            )) AS hls_ready,
+            COUNT(*) FILTER (WHERE NOT EXISTS (
+              SELECT 1 FROM track_playback_assets asset
+              WHERE asset.track_id=track.id
+                AND asset.status='ready'
+                AND asset.retired_at IS NULL
+            )) AS hls_missing,
+            COUNT(*) FILTER (
+              WHERE NOT EXISTS (
+                SELECT 1 FROM track_playback_assets asset
+                WHERE asset.track_id=track.id
+                  AND asset.status='ready'
+                  AND asset.retired_at IS NULL
+              )
+              AND EXISTS (
+                SELECT 1 FROM media_jobs job
+                WHERE job.track_id=track.id
+                  AND job.kind='prepare_hls'
+                  AND job.status='failed'
+                  AND job.attempts >= 6
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM media_jobs job
+                WHERE job.track_id=track.id
+                  AND job.kind='prepare_hls'
+                  AND job.status IN ('pending','running')
+              )
+            ) AS hls_failed
+          FROM library_tracks track
+          WHERE track.status='ready';
+          SQL
+            )"
+            IFS='|' read -r ready_tracks hls_ready hls_missing hls_failed extra <<<"${counts}"
+            if [[ -n "${extra:-}" ]] ||
+              [[ ! "${ready_tracks}" =~ ^[0-9]+$ ]] ||
+              [[ ! "${hls_ready}" =~ ^[0-9]+$ ]] ||
+              [[ ! "${hls_missing}" =~ ^[0-9]+$ ]] ||
+              [[ ! "${hls_failed}" =~ ^[0-9]+$ ]]; then
+              printf 'Could not parse the HLS readiness guard.\n' >&2
+              exit 1
+            fi
+            printf 'HLS pre-deploy guard: ready=%s hls_ready=%s missing=%s failed=%s\n' \
+              "${ready_tracks}" "${hls_ready}" "${hls_missing}" "${hls_failed}"
+            if (( hls_ready != ready_tracks || hls_missing != 0 || hls_failed != 0 )); then
+              printf 'HLS readiness guard rejected the rollout.\n' >&2
+              exit 1
+            fi
+          fi
 
           umask 077
-          next_env="$(mktemp /home/atozik/antolex-music/shared/.env.hls.XXXXXX)"
-          trap 'rm -f -- "${next_env}"' EXIT
+          next_env=""
+          replacement_started=0
+          cleanup_remote() {
+            status=$?
+            trap - EXIT
+            if [[ -n "${next_env}" ]]; then
+              rm -f -- "${next_env}"
+            fi
+            if (( status != 0 && replacement_started == 0 )); then
+              marker_owner=""
+              if [[ -f "${backup_marker}" && ! -L "${backup_marker}" ]]; then
+                IFS= read -r marker_owner <"${backup_marker}" || true
+              fi
+              if [[ "${marker_owner}" == "${rollback_token}" ]]; then
+                rm -f -- "${backup_env}" "${backup_marker}"
+              fi
+            fi
+            exit "${status}"
+          }
+          trap cleanup_remote EXIT
+          (
+            set -o noclobber
+            printf '%s\n' "${rollback_token}" >"${backup_marker}"
+          )
+          chmod 600 "${backup_marker}"
+          cp -p -- "${shared_env}" "${backup_env}"
+          next_env="$(mktemp "${root}/shared/.env.hls.XXXXXX")"
           awk -v value="${rollout}" '
             BEGIN { replaced = 0 }
             /^[[:space:]]*HLS_PLAYBACK_ENABLED[[:space:]]*=/ {
-              if (!replaced) {
-                print "HLS_PLAYBACK_ENABLED=" value
-                replaced = 1
+              if (replaced) {
+                exit 42
               }
+              print "HLS_PLAYBACK_ENABLED=" value
+              replaced = 1
               next
             }
             { print }
@@ -278,9 +455,21 @@ jobs:
             }
           ' "${shared_env}" >"${next_env}"
           chmod 600 "${next_env}"
+          replacement_started=1
           mv -f -- "${next_env}" "${shared_env}"
           trap - EXIT
           REMOTE_HLS
+            hls_backup_created=1
+          fi
+
+          scp -q "${ssh_options[@]}" \
+            "${RELEASE_ARCHIVE}" "${RELEASE_ARCHIVE}.sha256" \
+            "${remote}:${remote_root}/incoming/"
+
+          deploy_script="deploy-${RELEASE_ID}.sh"
+          scp -q "${ssh_options[@]}" \
+            ./scripts/deploy-production.sh \
+            "${remote}:${remote_root}/incoming/${deploy_script}"
 
           # These generated values are deliberately expanded on the runner.
           # shellcheck disable=SC2029
@@ -288,10 +477,89 @@ jobs:
             bash "${remote_root}/incoming/${deploy_script}" \
             "${RELEASE_ID}" "${RELEASE_ARCHIVE}" </dev/null
 
-      - name: Verify public HTTPS
-        shell: bash
-        run: |
+          # Every deployment reports only aggregate, read-only HLS readiness.
+          # A true rollout rechecks the gate after activation so a concurrent
+          # upload cannot silently leave the HLS frontend partially enabled.
+          require_ready=false
+          if [[ "${HLS_PLAYBACK_ROLLOUT}" == true ]]; then
+            require_ready=true
+          fi
+          ssh "${ssh_options[@]}" "${remote}" \
+            bash -s -- "${require_ready}" <<'REMOTE_READINESS'
           set -euo pipefail
+          require_ready="$1"
+          root=/home/atozik/antolex-music
+          shared_env="${root}/shared/.env"
+          current_release="$(readlink -f "${root}/current")"
+          if [[ ! -d "${current_release}" ]]; then
+            printf 'The active release link is invalid.\n' >&2
+            exit 1
+          fi
+          counts="$(
+            cd "${current_release}"
+            sudo -n docker compose \
+              --env-file "${shared_env}" \
+              --project-directory "${current_release}" \
+              -f "${current_release}/docker-compose.yml" \
+              --profile production exec -T postgres \
+              sh -ec 'psql -X -v ON_ERROR_STOP=1 -qAt -F "|" -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+          SELECT
+            COUNT(*) AS ready_tracks,
+            COUNT(*) FILTER (WHERE EXISTS (
+              SELECT 1 FROM track_playback_assets asset
+              WHERE asset.track_id=track.id
+                AND asset.status='ready'
+                AND asset.retired_at IS NULL
+            )) AS hls_ready,
+            COUNT(*) FILTER (WHERE NOT EXISTS (
+              SELECT 1 FROM track_playback_assets asset
+              WHERE asset.track_id=track.id
+                AND asset.status='ready'
+                AND asset.retired_at IS NULL
+            )) AS hls_missing,
+            COUNT(*) FILTER (
+              WHERE NOT EXISTS (
+                SELECT 1 FROM track_playback_assets asset
+                WHERE asset.track_id=track.id
+                  AND asset.status='ready'
+                  AND asset.retired_at IS NULL
+              )
+              AND EXISTS (
+                SELECT 1 FROM media_jobs job
+                WHERE job.track_id=track.id
+                  AND job.kind='prepare_hls'
+                  AND job.status='failed'
+                  AND job.attempts >= 6
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM media_jobs job
+                WHERE job.track_id=track.id
+                  AND job.kind='prepare_hls'
+                  AND job.status IN ('pending','running')
+              )
+            ) AS hls_failed
+          FROM library_tracks track
+          WHERE track.status='ready';
+          SQL
+          )"
+          IFS='|' read -r ready_tracks hls_ready hls_missing hls_failed extra <<<"${counts}"
+          if [[ -n "${extra:-}" ]] ||
+            [[ ! "${ready_tracks}" =~ ^[0-9]+$ ]] ||
+            [[ ! "${hls_ready}" =~ ^[0-9]+$ ]] ||
+            [[ ! "${hls_missing}" =~ ^[0-9]+$ ]] ||
+            [[ ! "${hls_failed}" =~ ^[0-9]+$ ]]; then
+            printf 'Could not parse post-deploy HLS readiness.\n' >&2
+            exit 1
+          fi
+          printf 'HLS post-deploy readiness: ready=%s hls_ready=%s missing=%s failed=%s\n' \
+            "${ready_tracks}" "${hls_ready}" "${hls_missing}" "${hls_failed}"
+          if [[ "${require_ready}" == true ]] &&
+            (( hls_ready != ready_tracks || hls_missing != 0 || hls_failed != 0 )); then
+            printf 'HLS readiness changed during deployment; restoring the previous flag.\n' >&2
+            exit 1
+          fi
+          REMOTE_READINESS
+
           curl --fail --silent --show-error \
             --retry 12 --retry-delay 5 --retry-all-errors --max-time 15 \
             https://music.antolex.net/api/v1/health >/dev/null
@@ -304,3 +572,32 @@ jobs:
           curl --fail --silent --show-error \
             --retry 12 --retry-delay 5 --retry-all-errors --max-time 15 \
             https://music.antolex.net/logo-wordmark.svg >/dev/null
+
+          if (( hls_backup_created == 1 )); then
+            ssh "${ssh_options[@]}" "${remote}" \
+              bash -s -- "${RELEASE_ID}" "${rollback_token}" <<'REMOTE_COMMIT_HLS'
+          set -euo pipefail
+          release_id="$1"
+          rollback_token="$2"
+          root=/home/atozik/antolex-music
+          backup_env="${root}/shared/.env.hls-backup-${release_id}"
+          backup_marker="${backup_env}.owner"
+
+          if [[ ! -f "${backup_marker}" || -L "${backup_marker}" ]]; then
+            printf 'The HLS backup ownership marker is missing or unsafe.\n' >&2
+            exit 1
+          fi
+          marker_owner=""
+          IFS= read -r marker_owner <"${backup_marker}" || true
+          if [[ "${marker_owner}" != "${rollback_token}" ]]; then
+            printf 'The HLS backup belongs to another deployment; refusing to remove it.\n' >&2
+            exit 1
+          fi
+          if [[ ! -f "${backup_env}" || -L "${backup_env}" ]]; then
+            printf 'The owned HLS environment backup is missing or unsafe.\n' >&2
+            exit 1
+          fi
+          rm -f -- "${backup_env}" "${backup_marker}"
+          REMOTE_COMMIT_HLS
+            hls_backup_created=0
+          fi
